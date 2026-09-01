@@ -32,7 +32,7 @@ from config.settings import settings
 from application.routes import (
     chat, agents, models, system,
     workflows, plugins, files, search, settings as settings_route, projects,
-    speech, vision, perception,
+    speech, vision, perception, rag,
 )
 from application.websocket import ws_manager
 
@@ -66,9 +66,12 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("  OmniRoute: NOT CONNECTED (running in offline mode)")
 
-    # Ensure data directories exist
+    # Ensure data directories exist and auto-ingest documents
     for dir_path in ["./data", "./data/documents", "./data/vector_store", "./logs"]:
         Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+    from rag.document_loader import document_loader
+    document_loader.ingest_directory("./data/documents")
 
     yield
 
@@ -88,21 +91,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── CORS (allow frontend dev server) ──
+# ── CORS (universally permissive for frontend dev & clients) ──
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # ── Register API Routes ──
@@ -119,6 +115,7 @@ app.include_router(projects.router)
 app.include_router(speech.router)
 app.include_router(vision.router)
 app.include_router(perception.router)
+app.include_router(rag.router)
 
 
 # ── WebSocket Endpoint ──

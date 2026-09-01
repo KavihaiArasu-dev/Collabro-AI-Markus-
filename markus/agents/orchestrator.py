@@ -35,9 +35,9 @@ INTENT_TO_AGENT: dict[IntentType, AgentType] = {
     IntentType.FILE_OPERATION: AgentType.AUTOMATION,
     IntentType.APP_CONTROL: AgentType.AUTOMATION,
     IntentType.BROWSER_AUTOMATION: AgentType.AUTOMATION,
-    IntentType.TASK_MANAGEMENT: AgentType.ORCHESTRATOR,
     IntentType.MULTI_STEP_ACTION: AgentType.ARCHITECT,
     IntentType.MEMORY: AgentType.MEMORY,
+    IntentType.CHAT: AgentType.RESEARCHER,
 }
 
 
@@ -95,10 +95,9 @@ class Orchestrator:
             intent = intent_classifier.classify(user_input)
             target_agent_type = INTENT_TO_AGENT.get(intent)
 
-        # If no specific agent matches, use the default orchestrator behavior
+        # If no specific agent matches, default to Researcher/General Assistant
         if not target_agent_type or target_agent_type not in self._agents:
-            # Default to Coder for general tasks, or use a simple LLM call
-            target_agent_type = AgentType.CODER
+            target_agent_type = AgentType.RESEARCHER
 
         agent = self._agents[target_agent_type]
 
@@ -125,7 +124,7 @@ class Orchestrator:
                 return
         else:
             intent = intent_classifier.classify(user_input)
-            target_agent_type = INTENT_TO_AGENT.get(intent, AgentType.CODER)
+            target_agent_type = INTENT_TO_AGENT.get(intent, AgentType.RESEARCHER)
 
         agent = self._agents.get(target_agent_type)
         if not agent:

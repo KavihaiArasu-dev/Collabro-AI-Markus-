@@ -17,7 +17,13 @@ const AIStateContext = createContext<AIStateContextType>({
   isConnected: false,
 });
 
-const WS_URL = 'ws://localhost:8000/ws';
+const getWsUrl = () => {
+  if (typeof window === 'undefined') return 'ws://localhost:8000/ws';
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // Use Vite proxy endpoint or direct backend connection
+  return `${proto}//${window.location.host}/ws`;
+};
+const WS_URL = getWsUrl();
 const MAX_RECONNECT_DELAY = 15000;
 
 export const AIStateProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -78,7 +84,8 @@ export const AIStateProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     function scheduleReconnect() {
       if (cancelled) return;
-      const delay = Math.min(1000 * Math.pow(2, reconnectAttempt), MAX_RECONNECT_DELAY);
+      // Gentle exponential backoff: 5s, 10s, 20s, then 30s probe when backend is offline
+      const delay = reconnectAttempt >= 3 ? 30000 : Math.min(5000 * Math.pow(2, reconnectAttempt), 30000);
       reconnectAttempt++;
       reconnectTimer = setTimeout(connect, delay);
     }

@@ -39,7 +39,7 @@ export default function AgentsPage() {
   useEffect(() => {
     const fetchAgents = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/agents/');
+        const res = await fetch('/api/agents/');
         if (res.ok) {
           const data = await res.json();
           if (data.agents && data.agents.length > 0) {

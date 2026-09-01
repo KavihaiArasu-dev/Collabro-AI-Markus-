@@ -27,19 +27,180 @@ interface HistoryItem {
   agent?: string;
 }
 
-const WAKE_WORD_REGEXES = [
-  /\b(hey|hello|hi|ok|okay)?\s*(markus|marcus|makus|make|marcos|markers|macus)\b/i,
-  /\b(hey|hello|hi|ok|okay)\s+(mark|make|makus|markus|marcus)\b/i,
-  /\b(markus|marcus|makus)\b/i,
-  /\b(hey|hello|hi|ok|okay)?\s*(marcos|markers)\b/i,
-];
+function levenshteinDistance(s1: string, s2: string): number {
+  const m = s1.length;
+  const n = s2.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (s1[i - 1] === s2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+  return dp[m][n];
+}
+
+const WAKE_PHRASES = ['hey markus', 'hey marcus', 'hi markus', 'hi marcus', 'markus', 'marcus', 'hey mark is', 'a markus'];
+
+function isFuzzyWakeWordMatch(transcript: string): boolean {
+  if (!transcript) return false;
+  const clean = transcript
+    .toLowerCase()
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // 1. Direct normalized phrase check
+  for (const phrase of WAKE_PHRASES) {
+    if (clean.includes(phrase)) return true;
+  }
+
+  // 2. Tokenized distance check
+  const words = clean.split(' ');
+  for (let i = 0; i < words.length; i++) {
+    const singleWord = words[i];
+    if (levenshteinDistance(singleWord, 'markus') <= 1 || levenshteinDistance(singleWord, 'marcus') <= 1) {
+      return true;
+    }
+    if (i < words.length - 1) {
+      const twoWords = `${words[i]} ${words[i + 1]}`;
+      for (const phrase of WAKE_PHRASES) {
+        if (levenshteinDistance(twoWords, phrase) <= 2) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 
 function stripWakeWords(text: string): string {
-  let cleaned = text;
-  WAKE_WORD_REGEXES.forEach(regex => {
-    cleaned = cleaned.replace(regex, ' ');
-  });
-  return cleaned.replace(/^[,\s.!?-]+|[,\s.!?-]+$/g, '').trim();
+  let cleaned = text.toLowerCase();
+  for (const phrase of WAKE_PHRASES) {
+    cleaned = cleaned.replace(new RegExp(`\\b${phrase}\\b`, 'gi'), ' ');
+  }
+  return cleaned
+    .replace(/\b(hey|hello|hi|ok|okay)?\s*(markus|marcus|makus|marcos|markers)\b/gi, ' ')
+    .replace(/^[,\s.!?-]+|[,\s.!?-]+$/g, '')
+    .trim();
+}
+
+// ── SAFE RECURSIVE-DESCENT ARITHMETIC PARSER (Zero eval, Zero Function) ──
+function safeEvaluateMath(expression: string): number | null {
+  const matched = expression.match(/\d+(\.\d+)?|[+\-*/%^()]|sqrt|pi|e/gi);
+  if (!matched || matched.length === 0) return null;
+  const tokens: string[] = matched;
+
+  let pos = 0;
+  function peek(): string | null {
+    return pos < tokens.length ? tokens[pos].toLowerCase() : null;
+  }
+  function consume(expected?: string): string {
+    const token = tokens[pos++];
+    if (expected && token.toLowerCase() !== expected.toLowerCase()) {
+      throw new Error(`Expected ${expected}, got ${token}`);
+    }
+    return token;
+  }
+
+  function parseExpr(): number {
+    return parseAdd();
+  }
+
+  function parseAdd(): number {
+    let left = parseMul();
+    while (peek() === '+' || peek() === '-') {
+      const op = consume();
+      const right = parseMul();
+      left = op === '+' ? left + right : left - right;
+    }
+    return left;
+  }
+
+  function parseMul(): number {
+    let left = parsePow();
+    while (peek() === '*' || peek() === '/' || peek() === '%') {
+      const op = consume();
+      const right = parsePow();
+      if (op === '*') left *= right;
+      else if (op === '/') {
+        if (right === 0) throw new Error('Division by zero');
+        left /= right;
+      } else if (op === '%') {
+        left %= right;
+      }
+    }
+    return left;
+  }
+
+  function parsePow(): number {
+    const base = parseUnary();
+    if (peek() === '^') {
+      consume('^');
+      const exponent = parsePow();
+      return Math.pow(base, exponent);
+    }
+    return base;
+  }
+
+  function parseUnary(): number {
+    if (peek() === '+') {
+      consume('+');
+      return parseUnary();
+    }
+    if (peek() === '-') {
+      consume('-');
+      return -parseUnary();
+    }
+    return parsePrimary();
+  }
+
+  function parsePrimary(): number {
+    const token = peek();
+    if (!token) throw new Error('Unexpected end of expression');
+
+    if (token === '(') {
+      consume('(');
+      const val = parseExpr();
+      consume(')');
+      return val;
+    }
+    if (token === 'sqrt') {
+      consume('sqrt');
+      consume('(');
+      const val = parseExpr();
+      consume(')');
+      if (val < 0) throw new Error('Square root of negative number');
+      return Math.sqrt(val);
+    }
+    if (token === 'pi') {
+      consume('pi');
+      return Math.PI;
+    }
+    if (token === 'e') {
+      consume('e');
+      return Math.E;
+    }
+
+    const num = parseFloat(consume());
+    if (isNaN(num)) throw new Error(`Invalid number: ${token}`);
+    return num;
+  }
+
+  try {
+    const result = parseExpr();
+    if (pos < tokens.length) return null;
+    return isFinite(result) ? result : null;
+  } catch {
+    return null;
+  }
 }
 
 function playWakeChime() {
@@ -88,7 +249,6 @@ export default function VoiceVisionHUD() {
   const [customModel, setCustomModel] = useState(() => localStorage.getItem('markus_custom_model') || 'gpt-4o-mini');
   const silenceTimerRef = useRef<any>(null);
   const handleProcessRequestRef = useRef<(input: string) => Promise<void>>(async () => {});
-
   const recognitionRef = useRef<any>(null);
   const isProcessingRef = useRef(false);
   const isAwakeRef = useRef(true);
@@ -97,15 +257,12 @@ export default function VoiceVisionHUD() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const selectedVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const awakeTimerRef = useRef<any>(null);
+  const lastWakeWordTimestampRef = useRef<number>(0);
+  const WAKE_WORD_COOLDOWN = 1500;
 
   useEffect(() => { isAwakeRef.current = isAwake; }, [isAwake]);
   useEffect(() => { wakeWordOnlyModeRef.current = wakeWordOnlyMode; }, [wakeWordOnlyMode]);
   useEffect(() => { isMicListeningRef.current = isMicListening; }, [isMicListening]);
-
-  // Stop backend voice listeners
-  useEffect(() => {
-    fetch('http://localhost:8000/api/speech/stop', { method: 'POST' }).catch(() => {});
-  }, []);
 
   // Pre-cache TTS voice
   useEffect(() => {
@@ -133,17 +290,19 @@ export default function VoiceVisionHUD() {
     return () => window.speechSynthesis?.removeEventListener('voiceschanged', pickVoice);
   }, []);
 
-  // ── Wake Word & Persistent Speech Recognition Setup ──
+  // ── Wake Word & Persistent Speech Recognition Setup (Client-Side Microphone Owner) ──
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) return;
 
+    let retryDelay = 250;
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
 
     recognition.onstart = () => {
+      retryDelay = 250;
       setIsMicListening(true);
       isMicListeningRef.current = true;
       setMicPermissionError(false);
@@ -163,13 +322,16 @@ export default function VoiceVisionHUD() {
       }
 
       const currentSpeech = (finalTranscript || interimTranscript).trim();
-      const lower = currentSpeech.toLowerCase();
       setLiveTranscript(currentSpeech);
 
-      const hasWakeWord = WAKE_WORD_REGEXES.some(regex => regex.test(lower));
+      // Check Wake Word: only on final results or if cooldown has passed to prevent multi-fire on interim frames
+      const now = Date.now();
+      const canCheckWake = Boolean(finalTranscript) || (now - lastWakeWordTimestampRef.current > WAKE_WORD_COOLDOWN);
+      const hasWakeWord = canCheckWake && isFuzzyWakeWordMatch(currentSpeech);
 
       if (hasWakeWord) {
-        // Stop any active TTS speech immediately and switch from ANY state to LISTENING
+        lastWakeWordTimestampRef.current = now;
+        // Stop any active TTS speech immediately and switch to LISTENING state
         if ('speechSynthesis' in window && window.speechSynthesis.speaking) {
           window.speechSynthesis.cancel();
           setIsSpeakingVoice(false);
@@ -220,6 +382,7 @@ export default function VoiceVisionHUD() {
     };
 
     recognition.onerror = (event: any) => {
+      // If permission is denied or revoked, halt retries and surface to user
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         setIsMicListening(false);
         isMicListeningRef.current = false;
@@ -227,15 +390,19 @@ export default function VoiceVisionHUD() {
       }
     };
 
+    // Auto-recovery on onend to guarantee continuous operation without silent death
     recognition.onend = () => {
       if (isMicListeningRef.current) {
         setTimeout(() => {
           if (isMicListeningRef.current && recognitionRef.current) {
             try {
               recognitionRef.current.start();
-            } catch {}
+              retryDelay = 250;
+            } catch {
+              retryDelay = Math.min(retryDelay * 1.5, 2000);
+            }
           }
-        }, 200);
+        }, retryDelay);
       }
     };
 
@@ -253,7 +420,7 @@ export default function VoiceVisionHUD() {
       if (awakeTimerRef.current) clearTimeout(awakeTimerRef.current);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     };
-  }, []);
+  }, [wakeWordOnlyMode, setAiState]);
 
   const toggleMicrophone = () => {
     if (!recognitionRef.current) return;
@@ -288,7 +455,7 @@ export default function VoiceVisionHUD() {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
-    fetch('http://localhost:8000/api/speech/stop', { method: 'POST' }).catch(() => {});
+    fetch('/api/speech/stop', { method: 'POST' }).catch(() => {});
 
     isProcessingRef.current = false;
     setIsSpeakingVoice(false);
@@ -343,7 +510,7 @@ export default function VoiceVisionHUD() {
           resolve();
         }
       } else {
-        fetch('http://localhost:8000/api/speech/speak', {
+        fetch('/api/speech/speak', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: textToSpeak }),
@@ -373,10 +540,93 @@ export default function VoiceVisionHUD() {
     window.speechSynthesis.speak(utterance);
   };
 
-  // ── HIGH-ACCURACY DYNAMIC CODE & KNOWLEDGE GENERATION ENGINE ──
+  // ── HIGH-ACCURACY DYNAMIC GENERAL KNOWLEDGE & CODE GENERATION ENGINE ──
   const generateRealAnswerOrCode = (rawPrompt: string): string => {
     const q = rawPrompt.toLowerCase().trim();
     const now = new Date();
+
+    // ── 0. SAFE DETERMINISTIC MATHEMATICAL EVALUATION (Guarded for actual math queries) ──
+    const isCodeOrGeneralQuery = (
+      q.includes('code') || q.includes('java') || q.includes('python') || q.includes('game') ||
+      q.includes('script') || q.includes('write') || q.includes('create') || q.includes('build') ||
+      q.includes('explain') || q.includes('how') || q.includes('who') || q.includes('what is') && q.length > 20
+    );
+
+    if (!isCodeOrGeneralQuery) {
+      // Must contain at least one digit and a math operator, or explicit math keyword
+      const isExplicitMath = q.startsWith('calculate') || q.startsWith('compute') || q.startsWith('solve') || q.startsWith('evaluate');
+      const hasMathExpression = /[\d]+\s*[\+\-\*\/\^\%]\s*[\d]+/.test(q) || /^(?:sqrt|sin|cos|tan)\s*\(\s*[\d\.]+\s*\)/.test(q);
+
+      if (isExplicitMath || hasMathExpression) {
+        const mathMatch = q.replace(/^(?:what is|calculate|evaluate|solve|compute)\s*/i, '').trim();
+        const calcResult = safeEvaluateMath(mathMatch);
+        if (calcResult !== null) {
+          return (
+            `**Calculation Result:**\n\n` +
+            `• **Expression**: \`${mathMatch}\`\n` +
+            `• **Answer**: **${calcResult}**\n\n` +
+            `*Calculated via Markus Safe Math Parser (Zero eval).*`
+          );
+        }
+      }
+    }
+
+    // 1. SPECIFIC CODE REQUESTS
+    // Stone Paper Scissors / Rock Paper Scissors Game
+    if (q.includes('stone') || q.includes('rock') || q.includes('paper') || q.includes('scissor') || q.includes('rps')) {
+      if (q.includes('java')) {
+        return (
+          "Here is a complete **Rock Paper Scissors (Stone Paper Scissor) Game** in **Java**:\n\n" +
+          "```java\n" +
+          "import java.util.Scanner;\n" +
+          "import java.util.Random;\n\n" +
+          "public class RockPaperScissors {\n" +
+          "    public static void main(String[] args) {\n" +
+          "        Scanner scanner = new Scanner(System.in);\n" +
+          "        Random random = new Random();\n" +
+          "        String[] choices = {\"rock\", \"paper\", \"scissors\"};\n\n" +
+          "        System.out.println(\"=== Stone Paper Scissors Game ===\");\n" +
+          "        System.out.println(\"Enter your move (rock, paper, or scissors). Type 'exit' to quit.\");\n\n" +
+          "        while (true) {\n" +
+          "            System.out.print(\"\\nYour choice: \");\n" +
+          "            String userChoice = scanner.nextLine().toLowerCase().trim();\n\n" +
+          "            if (userChoice.equals(\"exit\")) {\n" +
+          "                System.out.println(\"Thanks for playing! Goodbye.\");\n" +
+          "                break;\n" +
+          "            }\n\n" +
+          "            // Normalize common stone / scissor aliases\n" +
+          "            if (userChoice.equals(\"stone\")) userChoice = \"rock\";\n" +
+          "            if (userChoice.equals(\"scissor\")) userChoice = \"scissors\";\n\n" +
+          "            if (!userChoice.equals(\"rock\") && !userChoice.equals(\"paper\") && !userChoice.equals(\"scissors\")) {\n" +
+          "                System.out.println(\"Invalid move! Please enter rock, paper, or scissors.\");\n" +
+          "                continue;\n" +
+          "            }\n\n" +
+          "            int computerIndex = random.nextInt(3);\n" +
+          "            String computerChoice = choices[computerIndex];\n" +
+          "            System.out.println(\"Computer chose: \" + computerChoice);\n\n" +
+          "            if (userChoice.equals(computerChoice)) {\n" +
+          "                System.out.println(\"🤝 It's a tie!\");\n" +
+          "            } else if (\n" +
+          "                (userChoice.equals(\"rock\") && computerChoice.equals(\"scissors\")) ||\n" +
+          "                (userChoice.equals(\"paper\") && computerChoice.equals(\"rock\")) ||\n" +
+          "                (userChoice.equals(\"scissors\") && computerChoice.equals(\"paper\"))\n" +
+          "            ) {\n" +
+          "                System.out.println(\"🎉 You win!\");\n" +
+          "            } else {\n" +
+          "                System.out.println(\"🤖 Computer wins!\");\n" +
+          "            }\n" +
+          "        }\n" +
+          "        scanner.close();\n" +
+          "    }\n" +
+          "}\n" +
+          "```\n\n" +
+          "### How to Run:\n" +
+          "1. Save code to `RockPaperScissors.java`\n" +
+          "2. Compile with `javac RockPaperScissors.java`\n" +
+          "3. Run with `java RockPaperScissors`"
+        );
+      }
+    }
 
     // 1. SPECIFIC CODE REQUESTS
     // Calculator (CLI and GUI)
@@ -559,12 +809,162 @@ export default function VoiceVisionHUD() {
       );
     }
 
+    // Helper to detect requested programming language
+    const detectTargetLang = (text: string): 'c' | 'cpp' | 'java' | 'javascript' | 'rust' | 'python' => {
+      const lower = ` ${text.toLowerCase()} `;
+      if (lower.includes(' c++ ') || lower.includes(' cpp ') || lower.includes(' cplusplus ')) return 'cpp';
+      if (
+        lower.includes(' c program ') ||
+        lower.includes(' c code ') ||
+        lower.includes(' in c ') ||
+        lower.includes(' a c ') ||
+        lower.includes(' c language ') ||
+        lower.includes(' using c ') ||
+        /\b(c)\s+(program|code|file|script|game|function)\b/.test(lower)
+      ) {
+        if (!lower.includes(' c# ') && !lower.includes(' c++ ')) return 'c';
+      }
+      if (lower.includes(' java ') || lower.includes(' in java ')) return 'java';
+      if (lower.includes(' javascript ') || lower.includes(' js ') || lower.includes(' node ') || lower.includes(' typescript ') || lower.includes(' ts ')) return 'javascript';
+      if (lower.includes(' rust ')) return 'rust';
+      return 'python';
+    };
+
+    const targetLang = detectTargetLang(q);
+
     // Stone, Paper, Scissors Game (and speech acoustic variants)
     if (
       q.includes('stone') || q.includes('scissor') || q.includes('siccor') ||
       q.includes('rock') || q.includes('don\'t paper') || q.includes('stone paper') ||
       (q.includes('paper') && (q.includes('code') || q.includes('game') || q.includes('python') || q.includes('play') || q.includes('give') || q.includes('return')))
     ) {
+      if (targetLang === 'c') {
+        return (
+          "Here is the complete, interactive **Stone, Paper, Scissors (Rock, Paper, Scissors)** game in **C**:\n\n" +
+          "```c\n" +
+          "#include <stdio.h>\n" +
+          "#include <stdlib.h>\n" +
+          "#include <time.h>\n" +
+          "#include <ctype.h>\n\n" +
+          "int main() {\n" +
+          "    char userChoice, botChoice;\n" +
+          "    int userScore = 0, botScore = 0, rounds = 0;\n" +
+          "    char choices[] = {'s', 'p', 'c'};\n\n" +
+          "    // Seed random number generator\n" +
+          "    srand(time(NULL));\n\n" +
+          "    printf(\"==================================================\\n\");\n" +
+          "    printf(\"      🎮 STONE, PAPER, SCISSORS GAME IN C 🎮\\n\");\n" +
+          "    printf(\"==================================================\\n\");\n" +
+          "    printf(\"Commands: [s]tone / [p]aper / [c] (scissors) | [q]uit\\n\\n\");\n\n" +
+          "    while (1) {\n" +
+          "        printf(\"👉 Your choice (s/p/c/q): \");\n" +
+          "        if (scanf(\" %c\", &userChoice) != 1) break;\n" +
+          "        userChoice = tolower(userChoice);\n\n" +
+          "        if (userChoice == 'q') {\n" +
+          "            printf(\"\\n==================================================\\n\");\n" +
+          "            printf(\"🏁 Final Score — You: %d | Bot: %d | Total Rounds: %d\\n\", userScore, botScore, rounds);\n" +
+          "            printf(\"Thanks for playing!\\n\");\n" +
+          "            break;\n" +
+          "        }\n\n" +
+          "        if (userChoice != 's' && userChoice != 'p' && userChoice != 'c') {\n" +
+          "            printf(\"❌ Invalid choice! Please enter 's', 'p', 'c', or 'q'.\\n\\n\");\n" +
+          "            continue;\n" +
+          "        }\n\n" +
+          "        int randomIndex = rand() % 3;\n" +
+          "        botChoice = choices[randomIndex];\n" +
+          "        rounds++;\n\n" +
+          "        printf(\"\\n🧑 You chose:   %s\\n\", userChoice == 's' ? \"Stone (Rock) 🪨\" : (userChoice == 'p' ? \"Paper 📄\" : \"Scissors ✂️\"));\n" +
+          "        printf(\"🤖 Bot chose:   %s\\n\", botChoice == 's' ? \"Stone (Rock) 🪨\" : (botChoice == 'p' ? \"Paper 📄\" : \"Scissors ✂️\"));\n\n" +
+          "        if (userChoice == botChoice) {\n" +
+          "            printf(\"🤝 It's a TIE!\\n\");\n" +
+          "        } else if ((userChoice == 's' && botChoice == 'c') ||\n" +
+          "                   (userChoice == 'p' && botChoice == 's') ||\n" +
+          "                   (userChoice == 'c' && botChoice == 'p')) {\n" +
+          "            printf(\"🎉 YOU WIN this round!\\n\");\n" +
+          "            userScore++;\n" +
+          "        } else {\n" +
+          "            printf(\"💻 BOT WINS this round!\\n\");\n" +
+          "            botScore++;\n" +
+          "        }\n\n" +
+          "        printf(\"📊 Score: You %d - %d Bot\\n-----------------------------------\\n\\n\", userScore, botScore);\n" +
+          "    }\n\n" +
+          "    return 0;\n" +
+          "}\n" +
+          "```\n\n" +
+          "### How to compile and run:\n" +
+          "1. Save into `game.c`\n" +
+          "2. Compile with: `gcc game.c -o game`\n" +
+          "3. Run: `./game`"
+        );
+      }
+
+      if (targetLang === 'cpp') {
+        return (
+          "Here is the interactive **Stone, Paper, Scissors** game in **C++**:\n\n" +
+          "```cpp\n" +
+          "#include <iostream>\n" +
+          "#include <cstdlib>\n" +
+          "#include <ctime>\n" +
+          "using namespace std;\n\n" +
+          "int main() {\n" +
+          "    srand(time(0));\n" +
+          "    char userChoice, choices[] = {'s', 'p', 'c'};\n" +
+          "    int userScore = 0, botScore = 0, rounds = 0;\n\n" +
+          "    cout << \"🎮 STONE, PAPER, SCISSORS IN C++ 🎮\\n\";\n" +
+          "    while (true) {\n" +
+          "        cout << \"👉 Enter choice (s/p/c or q to quit): \";\n" +
+          "        cin >> userChoice;\n" +
+          "        userChoice = tolower(userChoice);\n" +
+          "        if (userChoice == 'q') break;\n" +
+          "        if (userChoice != 's' && userChoice != 'p' && userChoice != 'c') continue;\n" +
+          "        char bot = choices[rand() % 3];\n" +
+          "        rounds++;\n" +
+          "        cout << \"You: \" << userChoice << \" | Bot: \" << bot << endl;\n" +
+          "        if (userChoice == bot) cout << \"🤝 Tie!\\n\";\n" +
+          "        else if ((userChoice == 's' && bot == 'c') || (userChoice == 'p' && bot == 's') || (userChoice == 'c' && bot == 'p')) {\n" +
+          "            cout << \"🎉 You Win!\\n\"; userScore++;\n" +
+          "        } else { cout << \"💻 Bot Wins!\\n\"; botScore++; }\n" +
+          "        cout << \"Score: \" << userScore << \" - \" << botScore << endl;\n" +
+          "    }\n" +
+          "    return 0;\n" +
+          "}\n" +
+          "```"
+        );
+      }
+
+      if (targetLang === 'java') {
+        return (
+          "Here is the interactive **Stone, Paper, Scissors** game in **Java**:\n\n" +
+          "```java\n" +
+          "import java.util.Scanner;\n" +
+          "import java.util.Random;\n\n" +
+          "public class RockPaperScissors {\n" +
+          "    public static void main(String[] args) {\n" +
+          "        Scanner sc = new Scanner(System.in);\n" +
+          "        Random rand = new Random();\n" +
+          "        char[] choices = {'s', 'p', 'c'};\n" +
+          "        int userScore = 0, botScore = 0;\n\n" +
+          "        System.out.println(\"🎮 STONE, PAPER, SCISSORS (JAVA) 🎮\");\n" +
+          "        while (true) {\n" +
+          "            System.out.print(\"👉 Choice (s/p/c/q): \");\n" +
+          "            String input = sc.next().toLowerCase();\n" +
+          "            if (input.equals(\"q\")) break;\n" +
+          "            char user = input.charAt(0);\n" +
+          "            char bot = choices[rand.nextInt(3)];\n" +
+          "            System.out.println(\"You: \" + user + \" | Bot: \" + bot);\n" +
+          "            if (user == bot) System.out.println(\"🤝 Tie!\");\n" +
+          "            else if ((user == 's' && bot == 'c') || (user == 'p' && bot == 's') || (user == 'c' && bot == 'p')) {\n" +
+          "                System.out.println(\"🎉 You Win!\"); userScore++;\n" +
+          "            } else { System.out.println(\"💻 Bot Wins!\"); botScore++; }\n" +
+          "            System.out.println(\"Score: \" + userScore + \" - \" + botScore);\n" +
+          "        }\n" +
+          "        sc.close();\n" +
+          "    }\n" +
+          "}\n" +
+          "```"
+        );
+      }
+
       return (
         "Here is the complete, interactive **Rock, Paper, Scissors (Stone, Paper, Scissors)** game in Python:\n\n" +
         "```python\n" +
@@ -621,64 +1021,21 @@ export default function VoiceVisionHUD() {
       );
     }
 
-    // Tic Tac Toe
-    if (q.includes('tic tac') || q.includes('tictactoe')) {
-      return (
-        "Here is an interactive **Tic-Tac-Toe** game in Python:\n\n" +
-        "```python\n" +
-        "def print_board(board):\n" +
-        "    print(\"\\n  1   2   3\")\n" +
-        "    for i, row in enumerate(board):\n" +
-        "        print(f\"{i+1} \" + \" | \".join(row))\n" +
-        "        if i < 2: print(\"  ---+---+---\")\n\n" +
-        "def check_winner(board, player):\n" +
-        "    for i in range(3):\n" +
-        "        if all(board[i][j] == player for j in range(3)) or all(board[j][i] == player for j in range(3)):\n" +
-        "            return True\n" +
-        "    return (board[0][0] == board[1][1] == board[2][2] == player) or (board[0][2] == board[1][1] == board[2][0] == player)\n\n" +
-        "def play_game():\n" +
-        "    board = [[\" \" for _ in range(3)] for _ in range(3)]\n" +
-        "    current = \"X\"\n" +
-        "    print(\"🎮 Welcome to Tic-Tac-Toe!\")\n" +
-        "    while True:\n" +
-        "        print_board(board)\n" +
-        "        try:\n" +
-        "            r = int(input(f\"Player {current} row (1-3): \")) - 1\n" +
-        "            c = int(input(f\"Player {current} col (1-3): \")) - 1\n" +
-        "            if r not in range(3) or c not in range(3) or board[r][c] != \" \":\n" +
-        "                print(\"❌ Invalid spot. Try again.\")\n" +
-        "                continue\n" +
-        "        except ValueError:\n" +
-        "            print(\"❌ Enter numbers between 1 and 3.\")\n" +
-        "            continue\n" +
-        "        board[r][c] = current\n" +
-        "        if check_winner(board, current):\n" +
-        "            print_board(board)\n" +
-        "            print(f\"\\n🏆 Player {current} WINS!\")\n" +
-        "            break\n" +
-        "        if all(cell != \" \" for row in board for cell in row):\n" +
-        "            print_board(board)\n" +
-        "            print(\"\\n🤝 Game is a DRAW!\")\n" +
-        "            break\n" +
-        "        current = \"O\" if current == \"X\" else \"X\"\n\n" +
-        "if __name__ == \"__main__\":\n" +
-        "    play_game()\n" +
-        "```"
-      );
-    }
-
     // Hello World
     if (q.includes('hello world') || (q.includes('print') && q.includes('hello'))) {
-      if (q.includes('javascript') || q.includes('js')) {
+      if (targetLang === 'c') {
+        return "Here is the C program to print Hello World:\n\n```c\n#include <stdio.h>\n\nint main() {\n    printf(\"Hello, World!\\n\");\n    return 0;\n}\n```";
+      }
+      if (targetLang === 'javascript') {
         return "Here is the JavaScript code to print Hello World:\n\n```javascript\nconsole.log(\"Hello, World!\");\n```";
       }
-      if (q.includes('c++') || q.includes('cpp')) {
+      if (targetLang === 'cpp') {
         return "Here is the C++ code to print Hello World:\n\n```cpp\n#include <iostream>\n\nint main() {\n    std::cout << \"Hello, World!\" << std::endl;\n    return 0;\n}\n```";
       }
-      if (q.includes('java')) {
+      if (targetLang === 'java') {
         return "Here is the Java code to print Hello World:\n\n```java\npublic class Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hello, World!\");\n    }\n}\n```";
       }
-      if (q.includes('rust')) {
+      if (targetLang === 'rust') {
         return "Here is the Rust code to print Hello World:\n\n```rust\nfn main() {\n    println!(\"Hello, World!\");\n}\n```";
       }
       return "Here is the Python code to print Hello World:\n\n```python\nprint(\"Hello, World!\")\n```";
@@ -776,8 +1133,316 @@ export default function VoiceVisionHUD() {
       );
     }
 
+    // ── IDENTITY & DEVELOPER / CREATOR QUESTIONS ──
+    if (
+      q.includes('who is the developer of markus') || q.includes('who developed markus') ||
+      q.includes('who created markus') || q.includes('who made markus') ||
+      q.includes('who is your developer') || q.includes('who created you') ||
+      q.includes('who built you') || q.includes('who made you')
+    ) {
+      return (
+        "**Markus AI** is developed by **Kavihai Arasu** and the Markus AI engineering team.\n\n" +
+        "### Key Capabilities:\n" +
+        "• **Multimodal Intelligence**: Conversational general knowledge, real-time voice, and full-stack software development.\n" +
+        "• **Real-Time Vision & Emotion**: Live webcam face tracking and facial expression emotion analysis.\n" +
+        "• **Autonomous Agent Architecture**: Multi-agent orchestration for research, architecture, coding, and debugging."
+      );
+    }
+
+    if (q.includes('developer of python') || q.includes('who created python') || q.includes('who made python')) {
+      return (
+        "**Python** was created by Dutch programmer **Guido van Rossum** in the late 1980s at Centrum Wiskunde & Informatica (CWI) in the Netherlands, and officially released in **1991**.\n\n" +
+        "Guido served as Python's \"Benevolent Dictator for Life\" (BDFL) until 2018. The language was named after the British comedy series *Monty Python's Flying Circus*."
+      );
+    }
+
+    if (q.includes('developer of react') || q.includes('who created react') || q.includes('who made react')) {
+      return (
+        "**React** was created by **Jordan Walke**, a software engineer at **Meta (Facebook)**, in 2011. It was first deployed on Facebook's News Feed in 2011, on Instagram in 2012, and open-sourced at JSConf US in **May 2013**."
+      );
+    }
+
+    if (q.includes('developer of linux') || q.includes('who created linux') || q.includes('who made linux')) {
+      return (
+        "**Linux** was created by Finnish computer science student **Linus Torvalds** in **1991**. He published the initial Linux kernel as a free open-source operating system alternative to MINIX, which now powers the majority of global servers, cloud infrastructure, and Android."
+      );
+    }
+
+    if (q.includes('developer of javascript') || q.includes('who created javascript') || q.includes('who made javascript') || q.includes('who invented javascript')) {
+      return (
+        "**JavaScript** was created by **Brendan Eich** in **May 1995** while working at Netscape Communications. Famously, Eich designed and implemented the initial version of JavaScript in just **10 days**."
+      );
+    }
+
+    if (q.includes('developer of windows') || q.includes('who created windows') || q.includes('who founded microsoft') || q.includes('who created microsoft')) {
+      return (
+        "**Microsoft Windows** was developed by **Microsoft**, co-founded by **Bill Gates** and **Paul Allen** in 1975. The first version, Windows 1.0, was officially released on **November 20, 1985** as a graphical interface on top of MS-DOS."
+      );
+    }
+
+    if (q.includes('developer of apple') || q.includes('who created apple') || q.includes('who founded apple') || q.includes('who made mac')) {
+      return (
+        "**Apple Inc.** was co-founded by **Steve Jobs**, **Steve Wozniak**, and **Ronald Wayne** on **April 1, 1976** in Los Altos, California, to develop and sell Wozniak's Apple I personal computer."
+      );
+    }
+
+    if (q.includes('developer of google') || q.includes('who created google') || q.includes('who founded google')) {
+      return (
+        "**Google** was founded by **Larry Page** and **Sergey Brin** in **September 1998** while they were Ph.D. students at Stanford University in California. They developed the PageRank algorithm to rank web search results."
+      );
+    }
+
+    if (q.includes('developer of openai') || q.includes('who created openai') || q.includes('who founded openai') || q.includes('who created chatgpt')) {
+      return (
+        "**OpenAI** was founded in **December 2015** by **Sam Altman**, **Greg Brockman**, **Ilya Sutskever**, **Elon Musk**, **Wojciech Zaremba**, and **John Schulman**, with $1 billion in initial pledged funding."
+      );
+    }
+
+    if (q.includes('developer of c++') || q.includes('who created c++')) {
+      return "**C++** was designed and implemented by Danish computer scientist **Bjarne Stroustrup** at Bell Labs in **1979** as an extension of the C programming language (\"C with Classes\").";
+    }
+
+    if (q.includes('developer of c') || q.includes('who created c language') || q.includes('who created c ')) {
+      return "**C** was created by **Dennis Ritchie** between 1972 and 1973 at Bell Labs to re-implement the Unix operating system.";
+    }
+
+    if (q.includes('developer of java') || q.includes('who created java')) {
+      return "**Java** was developed by **James Gosling** (known as \"Dr. Java\") and his team at Sun Microsystems, released in **1995**.";
+    }
+
+    if (q.includes('developer of rust') || q.includes('who created rust')) {
+      return "**Rust** was originally designed by **Graydon Hoare** at Mozilla Research in **2006**, with official 1.0 release in May 2015.";
+    }
+
+    if (q.includes('developer of typescript') || q.includes('who created typescript')) {
+      return "**TypeScript** was developed by **Anders Hejlsberg** (the lead architect of C#) and Microsoft, publicly released in **October 2012**.";
+    }
+
+    if (q.includes('developer of git') || q.includes('who created git')) {
+      return "**Git** was created by **Linus Torvalds** in **2005** to manage development of the Linux kernel.";
+    }
+
+    // Generic "who is the developer of..." pattern
+    if (q.startsWith('who is the developer of') || q.startsWith('who developed') || q.startsWith('who created') || q.startsWith('who made') || q.startsWith('who invented')) {
+      const subject = rawPrompt.replace(/who (?:is the developer of|developed|created|made|invented)\s*/i, '').replace(/[?.]+$/g, '').trim();
+      return (
+        `### Developer / Creator Information for **${subject}**\n\n` +
+        `**${subject}** was conceived, engineered, and maintained by its original founding creators, core development teams, and open-source contributors.\n\n` +
+        `• **Subject**: ${subject}\n` +
+        `• **Origin**: Developed to solve fundamental engineering, scalability, and domain-specific challenges.\n` +
+        `• **Impact**: Widely adopted in modern computing, industry ecosystems, and global technology stacks.\n\n` +
+        `*Would you like a deeper architectural breakdown or history of ${subject}? Just ask!*`
+      );
+    }
+
+    // ── GENERAL SCIENCE & PHENOMENA ──
+    if (q.includes('photosynthesis')) {
+      return (
+        "**Photosynthesis** is the biological process by which green plants, algae, and certain bacteria convert sunlight, water ($H_2O$), and carbon dioxide ($CO_2$) into chemical energy (glucose) and oxygen ($O_2$).\n\n" +
+        "### Chemical Equation:\n" +
+        "$$6CO_2 + 6H_2O + \\text{Light} \\longrightarrow C_6H_{12}O_6 + 6O_2$$\n\n" +
+        "### Key Stages:\n" +
+        "1. **Light-Dependent Reactions**: Occur in thylakoid membranes; absorb photons to produce ATP and NADPH while releasing $O_2$.\n" +
+        "2. **Calvin Cycle (Light-Independent)**: Occurs in the stroma; uses ATP and NADPH to fix $CO_2$ into carbohydrates."
+      );
+    }
+
+    // ── 3. HISTORICAL FIGURES, INVENTORS & FOUNDERS OF COMPUTING ──
+    if (q.includes('father of computer') || q.includes('who invented computer') || q.includes('who created computer') || q.includes('father of the computer')) {
+      return (
+        "**Charles Babbage** (1791–1871) is widely regarded as the **\"Father of the Computer\"**.\n\n" +
+        "### Key Contributions:\n" +
+        "• **Analytical Engine (1837)**: Designed the world's first mechanical general-purpose computer incorporating an Arithmetic Logic Unit (ALU), basic flow control, and integrated memory.\n" +
+        "• **Difference Engine**: An automatic mechanical calculator designed to tabulate polynomial functions.\n" +
+        "• **Ada Lovelace**: Collaborated with Babbage and wrote the first computer algorithm (for the Analytical Engine), becoming the world's first computer programmer.\n\n" +
+        "*(Note: **Alan Turing** is considered the father of **modern theoretical computer science and artificial intelligence**).* "
+      );
+    }
+
+    if (q.includes('father of ai') || q.includes('father of artificial intelligence') || q.includes('who created ai') || q.includes('who invented ai')) {
+      return (
+        "**John McCarthy** (1927–2011) and **Alan Turing** (1912–1954) are considered the **Fathers of Artificial Intelligence**.\n\n" +
+        "• **John McCarthy**: Coined the term *\"Artificial Intelligence\"* in 1955 for the Dartmouth Conference (1956) and invented the **Lisp** programming language in 1958.\n" +
+        "• **Alan Turing**: Laid the theoretical foundation for AI in 1950 with his seminal paper *\"Computing Machinery and Intelligence\"* and introduced the famous **Turing Test**."
+      );
+    }
+
+    if (q.includes('father of c ') || q.includes('who created c') || q.includes('who invented c') || q.includes('who developed c')) {
+      return (
+        "**Dennis Ritchie** (1941–2011) is the creator and **\"Father of the C Programming Language\"**.\n\n" +
+        "He developed C between 1969 and 1972 at **Bell Labs** to implement the **Unix** operating system alongside Ken Thompson. C became one of the most widely used and influential programming languages of all time, directly inspiring C++, C#, Java, JavaScript, and Rust."
+      );
+    }
+
+    if (q.includes('father of c++') || q.includes('who created c++') || q.includes('who invented c++')) {
+      return (
+        "**Bjarne Stroustrup** is the creator and **\"Father of C++\"**.\n\n" +
+        "He began developing C++ (originally called *\"C with Classes\"*) in 1979 at Bell Labs to combine the speed and hardware-level control of C with the object-oriented features of Simula."
+      );
+    }
+
+    if (q.includes('father of java') || q.includes('who created java') || q.includes('who invented java')) {
+      return (
+        "**James Gosling** is known as the **\"Father of Java\"**.\n\n" +
+        "He developed Java at **Sun Microsystems** in the early 1990s (released in 1995) based on the philosophy: *\"Write Once, Run Anywhere\"* (WORA), using the Java Virtual Machine (JVM)."
+      );
+    }
+
+    if (q.includes('father of linux') || q.includes('who created linux') || q.includes('who invented linux')) {
+      return (
+        "**Linus Torvalds** is the creator and principal developer of the **Linux Operating System Kernel**.\n\n" +
+        "He released the first version in **1991** as a free open-source alternative to MINIX. Today, Linux powers over 90% of the world's cloud servers, supercomputers, Android devices, and IoT hardware. Linus also created the **Git** distributed version control system in 2005."
+      );
+    }
+
+    if (q.includes('father of internet') || q.includes('who invented the internet') || q.includes('who created internet')) {
+      return (
+        "**Vint Cerf** and **Bob Kahn** are recognized as the **\"Fathers of the Internet\"**.\n\n" +
+        "They co-designed the **TCP/IP** (Transmission Control Protocol / Internet Protocol) protocols in the 1970s, which form the fundamental architectural standard for data transmission across the global internet."
+      );
+    }
+
+    if (q.includes('father of www') || q.includes('who created world wide web') || q.includes('who invented the web') || q.includes('who created web')) {
+      return (
+        "**Sir Tim Berners-Lee** invented the **World Wide Web (WWW)** in **1989** at CERN (the European Organization for Nuclear Research).\n\n" +
+        "He created the first web browser (WorldWideWeb), the **HTTP** protocol, **HTML** markup language, and the **URL** addressing system."
+      );
+    }
+
+    // ── 4. HARDWARE, ARCHITECTURE & NETWORKING CONCEPTS ──
+    if (q.includes('what is ram') || q.includes('difference between ram and rom') || q.includes('what is rom')) {
+      return (
+        "**RAM (Random Access Memory)** vs **ROM (Read-Only Memory)**:\n\n" +
+        "• **RAM**: Volatile, ultra-fast temporary working memory used by the CPU to hold currently running programs and data. Cleared when power is turned off.\n" +
+        "• **ROM**: Non-volatile, permanent memory containing critical boot instructions (Firmware / BIOS / UEFI). Retains data even without power."
+      );
+    }
+
+    if (q.includes('what is cpu') || q.includes('how cpu works')) {
+      return (
+        "The **CPU (Central Processing Unit)** is the primary processor and \"brain\" of a computer.\n\n" +
+        "### Key Execution Cycle (Fetch-Decode-Execute):\n" +
+        "1. **Fetch**: Retrieves instructions from RAM or cache.\n" +
+        "2. **Decode**: The Control Unit (CU) interprets what operation is required.\n" +
+        "3. **Execute**: The Arithmetic Logic Unit (ALU) performs math or logical calculations and writes results to registers or memory."
+      );
+    }
+
+    if (q.includes('what is gpu') || q.includes('difference between cpu and gpu')) {
+      return (
+        "**GPU (Graphics Processing Unit)** vs **CPU**:\n\n" +
+        "• **CPU**: Optimized for sequential serial tasks with few, powerful high-speed cores.\n" +
+        "• **GPU**: Designed for massive parallel computing with thousands of smaller cores, ideal for 3D graphics rendering, video processing, and Matrix multiplication in AI / Deep Learning."
+      );
+    }
+
+    if (q.includes('what is http') || q.includes('http vs https') || q.includes('what is https')) {
+      return (
+        "**HTTP** (HyperText Transfer Protocol) is the foundational application-layer protocol for transferring web data.\n\n" +
+        "• **HTTP (Port 80)**: Transmits data in plaintext (unencrypted), vulnerable to eavesdropping and tampering.\n" +
+        "• **HTTPS (Port 443)**: Secure HTTP encrypted using **TLS/SSL** (Transport Layer Security), ensuring confidentiality, authentication, and data integrity."
+      );
+    }
+
+    if (q.includes('what is git') || q.includes('git vs github')) {
+      return (
+        "**Git** vs **GitHub**:\n\n" +
+        "• **Git**: A local, open-source distributed version control system created by Linus Torvalds to track source code history and branching.\n" +
+        "• **GitHub**: A cloud hosting platform and collaboration service for Git repositories with pull requests, CI/CD actions, issue tracking, and code review."
+      );
+    }
+
+    if (q.includes('what is docker') || q.includes('docker container')) {
+      return (
+        "**Docker** is an open-source platform that packages applications and all their dependencies into lightweight, portable, isolated units called **Containers**.\n\n" +
+        "Unlike virtual machines that bundle an entire guest OS, containers share the host kernel, starting in milliseconds with minimal overhead."
+      );
+    }
+
+    if (q.includes('why is the sky blue') || q.includes('why sky is blue')) {
+      return (
+        "The sky appears blue because of a phenomenon called **Rayleigh Scattering**.\n\n" +
+        "1. **Sunlight Composition**: Sunlight looks white, but is composed of all colors of the visible spectrum (different wavelengths).\n" +
+        "2. **Atmospheric Interaction**: When sunlight enters Earth's atmosphere, it collides with gas molecules (mostly Nitrogen and Oxygen).\n" +
+        "3. **Shorter Wavelengths Scatter More**: Shorter wavelengths (blue and violet light) scatter in all directions much more strongly than longer wavelengths (red, yellow, orange).\n" +
+        "4. **Human Eye Sensitivity**: Although violet light scatters even more than blue, human eyes are far more sensitive to blue light, making the daytime sky appear brilliant blue."
+      );
+    }
+
+    if (q.includes('quantum computing') || q.includes('what is quantum computer')) {
+      return (
+        "**Quantum Computing** leverages the fundamental principles of quantum mechanics (superposition and entanglement) to solve complex computational problems exponentially faster than classical computers.\n\n" +
+        "### Core Concepts:\n" +
+        "• **Qubit**: Unlike classical bits (0 or 1), a quantum bit can exist in a superposition of both $|0\\rangle$ and $|1\\rangle$ simultaneously.\n" +
+        "• **Entanglement**: Qubits can be linked such that the state of one instantly influences the other, enabling massive parallel processing.\n" +
+        "• **Applications**: Cryptography breaking (Shor's algorithm), molecular drug discovery, financial portfolio optimization, and materials science."
+      );
+    }
+
+    if (q.includes('gravity') || q.includes('what is gravity') || q.includes('how does gravity work')) {
+      return (
+        "**Gravity** is one of the four fundamental forces of nature.\n\n" +
+        "• **Newtonian View**: Gravity is an attractive force between any two objects with mass, proportional to the product of their masses and inversely proportional to the square of distance ($F = G \\frac{m_1 m_2}{r^2}$).\n" +
+        "• **Einstein's General Relativity**: Mass and energy warp the fabric of **spacetime**. Objects simply follow the natural curved paths (geodesics) created by massive bodies."
+      );
+    }
+
+    if (q.includes('speed of light')) {
+      return (
+        "The **speed of light in a vacuum** (denoted by $c$) is exactly:\n\n" +
+        "• **299,792,458 meters per second** (~300,000 km/s)\n" +
+        "• **~186,282 miles per second**\n" +
+        "• **~1.08 billion kilometers per hour**\n\n" +
+        "According to Einstein's Special Relativity, $c$ is the universal speed limit for all matter and information in the universe."
+      );
+    }
+
+    // ── GEOGRAPHY & WORLD CAPITALS ──
+    const capitals: Record<string, string> = {
+      france: 'Paris',
+      japan: 'Tokyo',
+      usa: 'Washington, D.C.',
+      'united states': 'Washington, D.C.',
+      america: 'Washington, D.C.',
+      uk: 'London',
+      'united kingdom': 'London',
+      england: 'London',
+      india: 'New Delhi',
+      germany: 'Berlin',
+      italy: 'Rome',
+      australia: 'Canberra',
+      canada: 'Ottawa',
+      spain: 'Madrid',
+      brazil: 'Brasília',
+      china: 'Beijing',
+      russia: 'Moscow',
+      egypt: 'Cairo',
+      mexico: 'Mexico City',
+      argentina: 'Buenos Aires',
+      netherlands: 'Amsterdam',
+      switzerland: 'Bern',
+      sweden: 'Stockholm',
+      norway: 'Oslo',
+      denmark: 'Copenhagen',
+      portugal: 'Lisbon',
+      greece: 'Athens',
+      turkey: 'Ankara',
+      'south korea': 'Seoul',
+      korea: 'Seoul',
+      thailand: 'Bangkok',
+      singapore: 'Singapore',
+      'new zealand': 'Wellington',
+      'south africa': 'Pretoria (administrative), Cape Town (legislative), Bloemfontein (judicial)',
+    };
+
+    for (const [country, cap] of Object.entries(capitals)) {
+      if (q.includes(`capital of ${country}`) || q.includes(`capital city of ${country}`)) {
+        return `The capital of **${country.toUpperCase()}** is **${cap}**.`;
+      }
+    }
+
     if (q.includes('who are you') || q.includes('your name')) {
-      return "I am Markus AI, your intelligent autonomous developer assistant.";
+      return "I am **Markus AI** — your intelligent autonomous assistant and developer. I answer general questions across science, history, philosophy, and geography, as well as write production-quality code and analyze real-time face emotions.";
     }
 
     if (q.includes('time')) {
@@ -798,9 +1463,13 @@ export default function VoiceVisionHUD() {
       return jokes[Math.floor(Math.random() * jokes.length)];
     }
 
-    // Dynamic Intelligent Code Synthesizer (for any coding request)
-    if (q.includes('code') || q.includes('function') || q.includes('script') || q.includes('write') || q.includes('gimme') || q.includes('give') || q.includes('return') || q.includes('program') || q.includes('game') || q.includes('python') || q.includes('make') || q.includes('create')) {
-      const cleanTaskName = rawPrompt.replace(/gimme|give me|a python code for|python code for|code for|write a|create a/gi, '').trim() || 'solution';
+    // Dynamic Intelligent Code Synthesizer (for explicit coding requests)
+    if (
+      q.includes('write code') || q.includes('write a function') || q.includes('write a script') ||
+      q.includes('write a python') || q.includes('implement a function') || q.includes('create a script') ||
+      q.includes('code for') || q.includes('python code for') || q.includes('function to')
+    ) {
+      const cleanTaskName = rawPrompt.replace(/write code for|write a python script for|python code for|code for|write a|create a|implement a/gi, '').trim() || 'solution';
       const funcName = cleanTaskName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'solve';
       return (
         `Here is the Python implementation for **"${rawPrompt}"**:\n\n` +
@@ -830,11 +1499,12 @@ export default function VoiceVisionHUD() {
       );
     }
 
-    // Informational explanation fallback
+    // Transparent, high-quality knowledge fallback
+    const capitalizedSubject = rawPrompt.charAt(0).toUpperCase() + rawPrompt.slice(1).replace(/[?.]+$/g, '');
     return (
-      `**Answer for "${rawPrompt}":**\n\n` +
-      `Regarding **${rawPrompt}**, I can assist you with full code implementations, debugging, or architectural explanations.\n\n` +
-      `• **Next Step**: Ask me for specific code, algorithms, or architecture designs!`
+      `### ${capitalizedSubject}\n\n` +
+      `You asked about: **${rawPrompt}**.\n\n` +
+      `*(Note: To unlock live open-domain AI answers for any complex or creative question, click **AI MODEL / KEY** in the top header and enter a free Gemini, Groq, or OpenAI API key, or ensure the Markus backend server is running).*`
     );
   };
 
@@ -859,10 +1529,113 @@ export default function VoiceVisionHUD() {
     abortControllerRef.current = controller;
 
     try {
-      // Option A: Direct LLM API Key (OpenAI / Groq / OpenRouter) if configured by user
-      if (customApiKey && customProvider !== 'backend') {
+      // ── PRIORITY 1: Markus OmniRoute Backend Stream (/api/chat/) ──
+      let backendSuccess = false;
+      try {
+        const fetchTimeout = setTimeout(() => controller.abort(), 45000);
+        const res = await fetch('/api/chat/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: inputStr,
+            stream: true,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(fetchTimeout);
+
+        if (res.ok) {
+          const reader = res.body?.getReader();
+          const decoder = new TextDecoder();
+
+          if (reader) {
+            let fullText = '';
+            let spokenLength = 0;
+            let sentenceCount = 0;
+            const MAX_SENTENCES = 4;
+            const MAX_CHARS = 600;
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              const textChunk = decoder.decode(value);
+              const lines = textChunk.split('\n').filter(l => l.startsWith('data: '));
+
+              for (const line of lines) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (data.done) continue;
+                  if (data.state) setAiState(data.state);
+                  if (data.category) setClassifiedCategory(data.category);
+                  if (data.intent) {
+                    setActiveAgent(data.category === 'question' ? 'Knowledge Agent' : `${data.intent.toUpperCase()} AGENT`);
+                  }
+                  if (data.content) {
+                    fullText += data.content;
+                    setAssistantReply(fullText);
+
+                    if (ttsEnabled && 'speechSynthesis' in window && sentenceCount < MAX_SENTENCES && spokenLength < MAX_CHARS) {
+                      const unspoken = fullText.slice(spokenLength);
+                      const sentenceEnd = unspoken.search(/[.!?]\s/);
+                      if (sentenceEnd !== -1) {
+                        const sentence = unspoken.slice(0, sentenceEnd + 1)
+                          .replace(/```[\s\S]*?```/g, '')
+                          .replace(/`([^`]+)`/g, '$1')
+                          .replace(/[*#_~`]/g, '')
+                          .trim();
+                        if (sentence && sentenceCount === 0) setAiState('speaking');
+                        if (sentence) {
+                          speakSentence(sentence);
+                          sentenceCount++;
+                        }
+                        spokenLength += sentenceEnd + 2;
+                      }
+                    }
+                  }
+                } catch {}
+              }
+            }
+
+            if (fullText && !fullText.includes("[Error:")) {
+              backendSuccess = true;
+              if (ttsEnabled && fullText && sentenceCount === 0) {
+                setAiState('speaking');
+                const cleanText = fullText
+                  .replace(/```[\s\S]*?```/g, 'Code block generated.')
+                  .replace(/`([^`]+)`/g, '$1')
+                  .replace(/[*#_~`]/g, '')
+                  .trim()
+                  .slice(0, MAX_CHARS);
+                await speakResponse(cleanText);
+              } else if (!ttsEnabled) {
+                setAiState('success');
+                setTimeout(() => setAiState(isMicListeningRef.current ? (isAwakeRef.current ? 'listening' : 'idle') : 'idle'), 800);
+              }
+
+              setHistory(prev => [{
+                id: crypto.randomUUID(),
+                command: inputStr,
+                response: fullText,
+                category,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                agent: activeAgent,
+              }, ...prev.slice(0, 10)]);
+              return;
+            }
+          }
+        }
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          console.warn('Backend stream notice:', err?.message || err);
+        }
+      }
+
+      // ── PRIORITY 2: Direct User-Configured BYO Cloud Provider Key (Fallback when OmniRoute is down) ──
+      if (!backendSuccess && customApiKey && customProvider !== 'backend') {
         try {
           let endpoint = 'https://api.openai.com/v1/chat/completions';
+          if (customProvider === 'gemini') endpoint = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
           if (customProvider === 'groq') endpoint = 'https://api.groq.com/openai/v1/chat/completions';
           if (customProvider === 'openrouter') endpoint = 'https://openrouter.ai/api/v1/chat/completions';
           if (customProvider === 'ollama') endpoint = 'http://localhost:11434/v1/chat/completions';
@@ -876,11 +1649,10 @@ export default function VoiceVisionHUD() {
             body: JSON.stringify({
               model: customModel,
               messages: [
-                { role: 'system', content: 'You are Markus AI, an expert software developer and assistant. Answer directly, accurately, and write clean code.' },
+                { role: 'system', content: 'You are Markus AI, an intelligent, versatile assistant and expert developer. Answer all user questions thoroughly, accurately, and conversationally across any topic — including general knowledge, science, philosophy, history, geography, and full-stack software development.' },
                 { role: 'user', content: inputStr }
               ],
             }),
-            signal: controller.signal,
           });
 
           if (res.ok) {
@@ -902,107 +1674,11 @@ export default function VoiceVisionHUD() {
             }
           }
         } catch (e) {
-          console.warn('Direct provider fetch error, falling back to local engine:', e);
+          console.warn('Direct provider fallback error:', e);
         }
       }
 
-      // Option B: Markus Backend Stream (/api/chat/)
-      try {
-        const res = await fetch('http://localhost:8000/api/chat/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: inputStr,
-            stream: true,
-          }),
-          signal: controller.signal,
-        });
-
-        if (!res.ok) throw new Error(`Backend status ${res.status}`);
-
-        const reader = res.body?.getReader();
-        const decoder = new TextDecoder();
-
-        if (reader) {
-          let fullText = '';
-          let spokenLength = 0;
-          let sentenceCount = 0;
-          const MAX_SENTENCES = 4;
-          const MAX_CHARS = 600;
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const textChunk = decoder.decode(value);
-            const lines = textChunk.split('\n').filter(l => l.startsWith('data: '));
-
-            for (const line of lines) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (data.done) continue;
-                if (data.state) setAiState(data.state);
-                if (data.category) setClassifiedCategory(data.category);
-                if (data.intent) {
-                  setActiveAgent(data.category === 'question' ? 'Knowledge Agent' : `${data.intent.toUpperCase()} AGENT`);
-                }
-                if (data.content) {
-                  fullText += data.content;
-                  setAssistantReply(fullText);
-
-                  if (ttsEnabled && 'speechSynthesis' in window && sentenceCount < MAX_SENTENCES && spokenLength < MAX_CHARS) {
-                    const unspoken = fullText.slice(spokenLength);
-                    const sentenceEnd = unspoken.search(/[.!?]\s/);
-                    if (sentenceEnd !== -1) {
-                      const sentence = unspoken.slice(0, sentenceEnd + 1)
-                        .replace(/```[\s\S]*?```/g, '')
-                        .replace(/`([^`]+)`/g, '$1')
-                        .replace(/[*#_~`]/g, '')
-                        .trim();
-                      if (sentence && sentenceCount === 0) setAiState('speaking');
-                      if (sentence) {
-                        speakSentence(sentence);
-                        sentenceCount++;
-                      }
-                      spokenLength += sentenceEnd + 2;
-                    }
-                  }
-                }
-              } catch {}
-            }
-          }
-
-          if (fullText && !fullText.includes("[Error:")) {
-            if (ttsEnabled && fullText && sentenceCount === 0) {
-              setAiState('speaking');
-              const cleanText = fullText
-                .replace(/```[\s\S]*?```/g, 'Code block generated.')
-                .replace(/`([^`]+)`/g, '$1')
-                .replace(/[*#_~`]/g, '')
-                .trim()
-                .slice(0, MAX_CHARS);
-              await speakResponse(cleanText);
-            } else if (!ttsEnabled) {
-              setAiState('success');
-              setTimeout(() => setAiState(isMicListeningRef.current ? (isAwakeRef.current ? 'listening' : 'idle') : 'idle'), 800);
-            }
-
-            setHistory(prev => [{
-              id: crypto.randomUUID(),
-              command: inputStr,
-              response: fullText,
-              category,
-              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              agent: activeAgent,
-            }, ...prev.slice(0, 10)]);
-            return;
-          }
-        }
-      } catch (err: any) {
-        if (err.name === 'AbortError') return;
-      }
-
-      // Option C: High-Accuracy Knowledge & Code Generator Engine
+      // ── PRIORITY 3: Safe Deterministic Arithmetic, Curated FAQ, or Transparent Offline Notice ──
       const directAnswer = generateRealAnswerOrCode(inputStr);
       setAssistantReply(directAnswer);
       setAiState('speaking');
@@ -1055,7 +1731,7 @@ export default function VoiceVisionHUD() {
   useEffect(() => {
     const fetchStatus = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/models/status');
+        const res = await fetch('/api/models/status');
         if (res.ok) {
           const data = await res.json();
           setGatewayStatus(data.connected ? 'Connected' : 'Offline');
@@ -1651,6 +2327,7 @@ export default function VoiceVisionHUD() {
                 value={customProvider}
                 onChange={(e) => {
                   setCustomProvider(e.target.value);
+                  if (e.target.value === 'gemini') setCustomModel('gemini-2.0-flash');
                   if (e.target.value === 'groq') setCustomModel('llama-3.3-70b-versatile');
                   if (e.target.value === 'openai') setCustomModel('gpt-4o-mini');
                   if (e.target.value === 'openrouter') setCustomModel('meta-llama/llama-3.3-70b-instruct');
@@ -1666,9 +2343,10 @@ export default function VoiceVisionHUD() {
                 }}
               >
                 <option value="backend" style={{ background: '#111' }}>Default (Local Knowledge & Backend)</option>
-                <option value="groq" style={{ background: '#111' }}>Groq (Ultra-Fast Free Tier)</option>
+                <option value="gemini" style={{ background: '#111' }}>Google Gemini (Gemini 2.0 / 1.5 Flash - Free API Key)</option>
+                <option value="groq" style={{ background: '#111' }}>Groq (Llama 3.3 70B - Ultra Fast Free Tier)</option>
                 <option value="openai" style={{ background: '#111' }}>OpenAI (GPT-4o / GPT-4o-mini)</option>
-                <option value="openrouter" style={{ background: '#111' }}>OpenRouter (Any LLM)</option>
+                <option value="openrouter" style={{ background: '#111' }}>OpenRouter (Any Cloud LLM)</option>
                 <option value="ollama" style={{ background: '#111' }}>Ollama (Localhost:11434)</option>
               </select>
             </div>

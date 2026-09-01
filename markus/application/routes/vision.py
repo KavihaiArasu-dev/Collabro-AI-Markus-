@@ -114,3 +114,42 @@ async def toggle_vision(request: ToggleCameraRequest):
         "emotion_detection_enabled": perception_manager.emotion_detection_enabled,
         "is_tracking": perception_manager.camera_enabled,
     }
+
+
+class RegisterFaceRequest(BaseModel):
+    name: str
+    image_base64: str
+
+
+@router.post("/register-face")
+async def register_face(request: RegisterFaceRequest):
+    """Register a new face profile from camera image."""
+    image_np = Camera.base64_to_cv2_image(request.image_base64)
+    if image_np is None:
+        raise HTTPException(status_code=400, detail="Invalid image data")
+
+    success = vision_service.register_face(request.name, image_np)
+    if not success:
+        raise HTTPException(status_code=400, detail="No clear face detected to register")
+
+    return {
+        "status": "success",
+        "name": request.name,
+        "message": f"Successfully registered face profile for '{request.name}'",
+        "known_faces": vision_service.get_known_faces(),
+    }
+
+
+@router.get("/known-faces")
+async def get_known_faces():
+    """List all registered face profiles."""
+    return {"known_faces": vision_service.get_known_faces()}
+
+
+@router.delete("/known-faces/{name}")
+async def delete_face(name: str):
+    """Delete a registered face profile."""
+    success = vision_service.remove_face(name)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Face profile '{name}' not found")
+    return {"status": "success", "message": f"Removed face profile '{name}'"}

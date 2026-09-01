@@ -183,10 +183,29 @@ class PermissionManager:
         ]
 
     def _log_decision(self, request: PermissionRequest):
-        """Add a decision to the audit log."""
+        """Add a decision to the audit log and write to logs/audit.log."""
         self._audit_log.append(request)
         if len(self._audit_log) > 10000:
             self._audit_log = self._audit_log[-5000:]
+        
+        try:
+            import os
+            import json
+            os.makedirs("logs", exist_ok=True)
+            with open("logs/audit.log", "a", encoding="utf-8") as f:
+                log_entry = {
+                    "id": request.id,
+                    "action": request.action,
+                    "tool_name": request.tool_name,
+                    "risk_level": request.risk_level.value,
+                    "decision": request.decision.value if request.decision else "pending",
+                    "decided_by": request.decided_by,
+                    "requested_by": request.requested_by,
+                    "timestamp": request.timestamp,
+                }
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception as e:
+            logger.warning(f"Failed to append to audit.log: {e}")
 
 
 # Singleton

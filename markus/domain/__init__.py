@@ -1,13 +1,32 @@
-"""Markus AI — Domain Layer package."""
+"""
+Markus AI — Domain Layer
+"""
 
-from .entities import (
-    Project, ProjectStatus,
-    Task, TaskStatus,
-    Conversation,
+from domain.entities import (
+    MessageRole,
+    ChatMessage,
+    FaceIdentity,
+    DocumentChunk,
+    RAGSearchResult,
+    Project,
+    ProjectStatus,
+)
+from domain.state_machine import (
+    ConversationState,
+    StateMachine,
+    InvalidTransitionError,
 )
 
 __all__ = [
-    "Project", "ProjectStatus",
-    "Task", "TaskStatus",
-    "Conversation",
+    "MessageRole",
+    "ChatMessage",
+    "FaceIdentity",
+    "DocumentChunk",
+    "RAGSearchResult",
+    "Project",
+    "ProjectStatus",
+    "ConversationState",
+    "StateMachine",
+    "InvalidTransitionError",
 ]
+

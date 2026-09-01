@@ -27,7 +27,7 @@ export default function Dashboard() {
   useEffect(() => {
     const fetchMetrics = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/system/metrics');
+        const res = await fetch('/api/system/metrics');
         if (res.ok) {
           const data = await res.json();
           setMetrics(m => ({
@@ -42,7 +42,7 @@ export default function Dashboard() {
 
     const fetchGateway = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/models/status');
+        const res = await fetch('/api/models/status');
         if (res.ok) {
           const data = await res.json();
           setGatewayConnected(data.connected);
@@ -52,7 +52,7 @@ export default function Dashboard() {
 
     const fetchAgents = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/agents/');
+        const res = await fetch('/api/agents/');
         if (res.ok) {
           const data = await res.json();
           setAgents(data.agents || []);
