@@ -1,0 +1,13 @@
+{
+  "name": "markus-ai-root",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix markus/apps/frontend run dev",
+    "build": "npm --prefix markus/apps/frontend run build",
+    "preview": "npm --prefix markus/apps/frontend run preview",
+    "backend": "cd markus && .\\venv\\Scripts\\python.exe main.py",
+    "omniroute": "omniroute serve --no-open",
+    "start": "start_all.bat"
+  }
+}

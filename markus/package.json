@@ -1,0 +1,10 @@
+{
+  "name": "markus-ai-backend-and-apps",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix apps/frontend run dev",
+    "build": "npm --prefix apps/frontend run build",
+    "preview": "npm --prefix apps/frontend run preview"
+  }
+}
