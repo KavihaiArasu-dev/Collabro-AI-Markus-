@@ -51,9 +51,16 @@ class VisionService:
             bbox = f["bbox"]
             x, y, w, h = bbox["x"], bbox["y"], bbox["w"], bbox["h"]
             face_crop = image_np[y:y + h, x:x + w]
+            if face_crop.size == 0:
+                face_crop = image_np
 
-            # 1. Face Recognition / Identity Matching
-            identity, id_conf = self.face_recognizer.recognize_face(face_crop)
+            # 1. Face Recognition / Identity Matching with landmarks alignment
+            landmarks = f.get("landmarks")
+            identity, id_conf = self.face_recognizer.recognize_face(
+                image_np,
+                bbox=(x, y, w, h),
+                landmarks=landmarks,
+            )
             label = f"{identity} (#{f['track_id']})" if identity != "Unknown" else f"TARGET #{f['track_id']}"
 
             # 2. Emotion Estimation
@@ -96,11 +103,14 @@ class VisionService:
         """Register a user's face from the camera image."""
         boxes = self.face_tracker.detect_faces(image_np)
         if not boxes:
-            return False
+            # Fallback: register center region if detector is uncertain
+            h, w = image_np.shape[:2]
+            return self.face_recognizer.register_face(name, image_np, bbox=(int(w * 0.2), int(h * 0.1), int(w * 0.6), int(h * 0.8)))
 
-        x, y, w, h = boxes[0]
-        face_crop = image_np[y:y + h, x:x + w]
-        return self.face_recognizer.register_face(name, face_crop)
+        det = boxes[0]
+        bbox = det.get("bbox")
+        landmarks = det.get("landmarks")
+        return self.face_recognizer.register_face(name, image_np, bbox=bbox, landmarks=landmarks)
 
     def get_known_faces(self) -> List[str]:
         return self.face_recognizer.get_registered_names()

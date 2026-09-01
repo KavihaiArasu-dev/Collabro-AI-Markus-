@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, CameraOff, Eye, ShieldCheck, Activity, Smile, Sparkles, UserCheck, UserPlus, Check, X } from 'lucide-react';
+import { Camera, CameraOff, Eye, ShieldCheck, Activity, Smile, Sparkles, UserCheck, UserPlus, Check, X, Trash2 } from 'lucide-react';
 import { useAIState } from '../context/AIStateContext';
 
 /* ═══════════════════════════════════════════════════════════
@@ -90,6 +90,72 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
   const lastEmittedEmotionRef = useRef<string>('neutral');
   const candidateEmotionRef = useRef<{ emotion: string; firstSeen: number }>({ emotion: 'neutral', firstSeen: 0 });
   const backendAvailableRef = useRef<boolean>(true);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const lastBackendSuccessRef = useRef<number>(0);
+
+  // Exact projection of normalized bounding box over CSS object-fit: cover and scaleX(-1) mirror
+  const computeVideoCoverRect = (
+    nx: number,
+    ny: number,
+    nw: number,
+    nh: number,
+    vWidth: number,
+    vHeight: number,
+    cWidth: number,
+    cHeight: number,
+    mirrored: boolean = true
+  ) => {
+    if (!vWidth || !vHeight || !cWidth || !cHeight) {
+      const rawX = mirrored ? (1 - (nx + nw)) * 100 : nx * 100;
+      return {
+        x: Math.max(0, Math.min(95, rawX)),
+        y: Math.max(0, Math.min(95, ny * 100)),
+        width: Math.max(8, Math.min(90, nw * 100)),
+        height: Math.max(10, Math.min(90, nh * 100)),
+      };
+    }
+
+    const vRatio = vWidth / vHeight;
+    const cRatio = cWidth / cHeight;
+
+    let renderW: number;
+    let renderH: number;
+    let offsetX: number;
+    let offsetY: number;
+
+    if (cRatio > vRatio) {
+      renderW = cWidth;
+      renderH = cWidth / vRatio;
+      offsetX = 0;
+      offsetY = (renderH - cHeight) / 2;
+    } else {
+      renderH = cHeight;
+      renderW = cHeight * vRatio;
+      offsetX = (renderW - cWidth) / 2;
+      offsetY = 0;
+    }
+
+    let faceLeftInRender = nx * renderW;
+    const faceTopInRender = ny * renderH;
+    const faceWInRender = nw * renderW;
+    const faceHInRender = nh * renderH;
+
+    if (mirrored) {
+      faceLeftInRender = renderW - (faceLeftInRender + faceWInRender);
+    }
+
+    const leftPct = ((faceLeftInRender - offsetX) / cWidth) * 100;
+    const topPct = ((faceTopInRender - offsetY) / cHeight) * 100;
+    const widthPct = (faceWInRender / cWidth) * 100;
+    const heightPct = (faceHInRender / cHeight) * 100;
+
+    return {
+      x: Math.round(Math.max(0, Math.min(96, leftPct)) * 10) / 10,
+      y: Math.round(Math.max(0, Math.min(96, topPct)) * 10) / 10,
+      width: Math.round(Math.max(8, Math.min(95, widthPct)) * 10) / 10,
+      height: Math.round(Math.max(10, Math.min(95, heightPct)) * 10) / 10,
+    };
+  };
 
   // Extract 64-dimensional normalized spatial feature embedding from cropped face region
   const extractClientFaceSignature = (
@@ -179,6 +245,15 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
   // Client-side real-time multi-face & biometric expression detector
   const analyzeClientSideFrame = async (ctx: CanvasRenderingContext2D, width: number, height: number) => {
     try {
+      // If backend is active and producing live detections, let backend control the overlays
+      if (backendAvailableRef.current && (Date.now() - lastBackendSuccessRef.current < 1500)) {
+        return;
+      }
+
+      const cRect = containerRef.current?.getBoundingClientRect();
+      const cWidth = cRect?.width || 320;
+      const cHeight = cRect?.height || 190;
+
       // ── Option A: Native Browser Hardware-Accelerated Multi-FaceDetector API (if supported) ──
       if (typeof (window as any).FaceDetector === 'function' && videoRef.current) {
         try {
@@ -201,10 +276,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
               const normW = box.width / vw;
               const normH = box.height / vh;
 
-              const targetX = Math.max(0, Math.min(92, (1 - (normX + normW)) * 100));
-              const targetY = Math.max(0, Math.min(92, normY * 100));
-              const targetW = Math.max(10, Math.min(90, normW * 100));
-              const targetH = Math.max(12, Math.min(90, normH * 100));
+              const coverBox = computeVideoCoverRect(normX, normY, normW, normH, vw, vh, cWidth, cHeight, true);
 
               // Crop face region for expression analysis
               const cropX = Math.max(0, Math.floor(normX * width));
@@ -228,12 +300,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
                 label: registeredFaces[i] || `FACE #${i + 1}`,
                 expression: rawEmotion,
                 confidence: roundDec(rawConf, 2),
-                box: {
-                  x: Math.round(targetX * 10) / 10,
-                  y: Math.round(targetY * 10) / 10,
-                  width: Math.round(targetW * 10) / 10,
-                  height: Math.round(targetH * 10) / 10,
-                },
+                box: coverBox,
               });
             }
 
@@ -393,11 +460,21 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
         const normX = bestBox.x / width;
         const normY = bestBox.y / height;
 
-        // Mirrored X for webcam preview
-        const rawTargetX = Math.max(0, Math.min(92, (1 - (normX + normW)) * 100));
-        const rawTargetY = Math.max(0, Math.min(92, normY * 100));
-        const rawTargetW = Math.max(12, Math.min(90, normW * 100));
-        const rawTargetH = Math.max(15, Math.min(90, normH * 100));
+        const coverBox = computeVideoCoverRect(
+          normX,
+          normY,
+          normW,
+          normH,
+          videoRef.current?.videoWidth || width,
+          videoRef.current?.videoHeight || height,
+          cWidth,
+          cHeight,
+          true
+        );
+        const rawTargetX = coverBox.x;
+        const rawTargetY = coverBox.y;
+        const rawTargetW = coverBox.width;
+        const rawTargetH = coverBox.height;
 
         // Smooth bounding box via Exponential Moving Average (EMA) to eliminate jitter
         if (smoothedBoxRef.current) {
@@ -850,12 +927,12 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       if (!isSubscribed || !cameraActiveRef.current || !backendAvailableRef.current) return;
       await syncBackendFrame();
       if (isSubscribed && cameraActiveRef.current) {
-        backendTimerRef.current = setTimeout(runBackendLoop, 800);
+        backendTimerRef.current = setTimeout(runBackendLoop, 250);
       }
     };
 
     timerRef.current = setTimeout(runClientLoop, 80);
-    backendTimerRef.current = setTimeout(runBackendLoop, 600);
+    backendTimerRef.current = setTimeout(runBackendLoop, 200);
 
     return () => {
       isSubscribed = false;
@@ -1059,17 +1136,25 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       }).catch(() => null);
 
       if (res && res.ok) {
+        backendAvailableRef.current = true;
         const data = await res.json();
         if (data.hedged_description) {
           setHedgedText(data.hedged_description);
         }
         if (data.face_count !== undefined && data.face_count > 0) {
           consecutiveMissesRef.current = 0;
+          lastBackendSuccessRef.current = Date.now();
           setFaceCount(data.face_count);
           if (data.expression) setExpression(data.expression);
           if (data.expression_confidence) setConfidence(data.expression_confidence);
 
           if (data.faces && data.faces.length > 0) {
+            const vWidth = videoRef.current?.videoWidth || 640;
+            const vHeight = videoRef.current?.videoHeight || 480;
+            const cRect = containerRef.current?.getBoundingClientRect();
+            const cWidth = cRect?.width || 320;
+            const cHeight = cRect?.height || 190;
+
             const parsedFaces: TrackedFaceItem[] = data.faces.map((f: any, idx: number) => {
               const norm = f.normalized_bbox || {};
               const nx = typeof norm.x === 'number' ? norm.x : 0.2;
@@ -1077,20 +1162,25 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
               const nw = typeof norm.w === 'number' ? norm.w : 0.45;
               const nh = typeof norm.h === 'number' ? norm.h : 0.55;
 
-              const mirroredX = Math.max(0, Math.min(92, (1 - (nx + nw)) * 100));
-              const boxY = Math.max(0, Math.min(92, ny * 100));
-              const boxWidth = Math.max(10, Math.min(90, nw * 100));
-              const boxHeight = Math.max(12, Math.min(90, nh * 100));
+              const coverBox = computeVideoCoverRect(nx, ny, nw, nh, vWidth, vHeight, cWidth, cHeight, true);
 
+              const identityName = f.identity && f.identity !== 'Unknown' ? f.identity : '';
               return {
                 trackId: f.track_id || (idx + 1),
-                label: f.identity || registeredFaces[0] || `TARGET #${f.track_id || (idx + 1)}`,
+                identity: identityName,
+                label: identityName || (registeredFaces[0] || `TARGET #${f.track_id || (idx + 1)}`),
                 expression: f.expression || data.expression || 'neutral',
-                confidence: f.confidence || data.expression_confidence || 0.85,
-                box: { x: mirroredX, y: boxY, width: boxWidth, height: boxHeight },
+                confidence: f.expression_confidence || data.expression_confidence || 0.85,
+                box: coverBox,
               };
             });
             setFaces(parsedFaces);
+          }
+        } else if (data.face_count === 0) {
+          consecutiveMissesRef.current += 1;
+          if (consecutiveMissesRef.current > 15) {
+            setFaceCount(0);
+            setFaces([]);
           }
         }
       }
@@ -1099,8 +1189,42 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
     }
   };
 
+  const syncKnownFacesFromBackend = async () => {
+    try {
+      const res = await fetch('/api/vision/known-faces');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.known_faces && Array.isArray(data.known_faces) && data.known_faces.length > 0) {
+          setRegisteredFaces(data.known_faces);
+          try {
+            localStorage.setItem('markus_known_faces', JSON.stringify(data.known_faces));
+          } catch {}
+        }
+      }
+    } catch {}
+  };
+
+  const handleDeleteFace = async (nameToDelete: string) => {
+    const updated = registeredFaces.filter(n => n !== nameToDelete);
+    const finalFaces = updated.length > 0 ? updated : ['Kavihai Arasu (Owner)'];
+    setRegisteredFaces(finalFaces);
+    const updatedProfiles = faceProfiles.filter(p => p.name !== nameToDelete);
+    setFaceProfiles(updatedProfiles);
+    try {
+      localStorage.setItem('markus_known_faces', JSON.stringify(finalFaces));
+      localStorage.setItem('markus_known_face_profiles', JSON.stringify(updatedProfiles));
+    } catch {}
+
+    try {
+      await fetch(`/api/vision/known-faces/${encodeURIComponent(nameToDelete)}`, {
+        method: 'DELETE',
+      });
+    } catch {}
+  };
+
   useEffect(() => {
     refreshCameraDevices();
+    syncKnownFacesFromBackend();
 
     const handleDeviceChange = () => {
       refreshCameraDevices();
@@ -1161,6 +1285,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: trimmedName, image_base64: base64 }),
         });
+        await syncKnownFacesFromBackend();
       } catch {}
     }
 
@@ -1341,24 +1466,74 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
                 Save Face Profile
               </button>
             </form>
+
+            {registeredFaces && registeredFaces.length > 0 && (
+              <div style={{ marginTop: 16, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 12 }}>
+                <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  Registered Profiles ({registeredFaces.length})
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 120, overflowY: 'auto' }}>
+                  {registeredFaces.map((name) => (
+                    <div
+                      key={name}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '5px 8px',
+                        background: 'rgba(255,255,255,0.03)',
+                        border: '1px solid rgba(255,255,255,0.06)',
+                        borderRadius: 6,
+                        fontSize: '0.72rem',
+                      }}
+                    >
+                      <span style={{ color: '#00E5FF', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteFace(name)}
+                        title={`Remove profile ${name}`}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#EF4444',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: 2,
+                          opacity: 0.8,
+                          transition: 'opacity 0.2s ease',
+                        }}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* Futuristic Video Stream Container with HUD overlays */}
-      <div style={{
-        position: 'relative',
-        width: '100%',
-        height: 190,
-        borderRadius: 14,
-        overflow: 'hidden',
-        background: '#04070F',
-        border: '1px solid rgba(0, 229, 255, 0.15)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexShrink: 0,
-      }}>
+      <div
+        ref={containerRef}
+        style={{
+          position: 'relative',
+          width: '100%',
+          height: 190,
+          borderRadius: 14,
+          overflow: 'hidden',
+          background: '#04070F',
+          border: '1px solid rgba(0, 229, 255, 0.15)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+        }}
+      >
         {/* HUD Corner Brackets */}
         <div style={{ position: 'absolute', top: 6, left: 6, width: 10, height: 10, borderTop: '2px solid #00E5FF', borderLeft: '2px solid #00E5FF', pointerEvents: 'none', zIndex: 5 }} />
         <div style={{ position: 'absolute', top: 6, right: 6, width: 10, height: 10, borderTop: '2px solid #00E5FF', borderRight: '2px solid #00E5FF', pointerEvents: 'none', zIndex: 5 }} />
