@@ -61,10 +61,10 @@ class VisionService:
                 bbox=(x, y, w, h),
                 landmarks=landmarks,
             )
-            label = f"{identity} (#{f['track_id']})" if identity != "Unknown" else f"TARGET #{f['track_id']}"
+            label = f"{identity}" if identity != "Unknown" else "Unknown"
 
             # 2. Emotion Estimation
-            expression, exp_conf, scores = self.emotion_estimator.estimate_expression(face_crop)
+            expression, exp_conf, scores = self.emotion_estimator.estimate_expression(face_crop, landmarks=landmarks)
 
             if idx == 0:
                 dominant_expression = expression

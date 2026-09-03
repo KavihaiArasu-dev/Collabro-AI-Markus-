@@ -92,6 +92,9 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
   const backendAvailableRef = useRef<boolean>(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const lastBackendSuccessRef = useRef<number>(0);
+  const mpDetectorRef = useRef<any>(null);
+  const mpLoadingRef = useRef<boolean>(false);
+  const lastDetectedNormBoxRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
   // Exact projection of normalized bounding box over CSS object-fit: cover and scaleX(-1) mirror
   const computeVideoCoverRect = (
@@ -209,17 +212,12 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
   const matchClientFace = (
     embedding: number[] | null,
     profiles: { name: string; embedding: number[] }[]
-  ): { name: string; confidence: number } => {
-    const defaultOwner = registeredFaces[0] || 'Kavihai Arasu (Owner)';
-    if (!profiles || profiles.length === 0) {
-      return { name: defaultOwner, confidence: 0.94 };
+  ): { name: string; confidence: number; isKnown: boolean } => {
+    if (!profiles || profiles.length === 0 || !embedding) {
+      return { name: 'Unknown', confidence: 0.85, isKnown: false };
     }
 
-    if (!embedding) {
-      return { name: profiles[0]?.name || defaultOwner, confidence: 0.90 };
-    }
-
-    let bestName = profiles[0]?.name || defaultOwner;
+    let bestName = 'Unknown';
     let bestSim = -1;
 
     for (const p of profiles) {
@@ -234,13 +232,83 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       }
     }
 
-    if (bestSim >= 0.70) {
+    if (bestSim >= 0.72) {
       const conf = Math.min(0.98, Math.max(0.80, bestSim));
-      return { name: bestName, confidence: conf };
+      return { name: bestName, confidence: conf, isKnown: true };
     }
 
-    return { name: defaultOwner, confidence: 0.92 };
+    return { name: 'Unknown', confidence: 0.85, isKnown: false };
   };
+
+  // Initialize MediaPipe Vision Tasks FaceDetector (BlazeFace Short Range)
+  useEffect(() => {
+    let isMounted = true;
+    const initMediaPipeDetector = async () => {
+      if (mpDetectorRef.current || mpLoadingRef.current) return;
+      mpLoadingRef.current = true;
+      try {
+        const { FaceDetector, FilesetResolver } = await import('@mediapipe/tasks-vision');
+        let vision: any = null;
+        try {
+          vision = await FilesetResolver.forVisionTasks('/wasm');
+        } catch {
+          vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/wasm');
+        }
+
+        let detector: any = null;
+        try {
+          detector = await FaceDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: '/blaze_face_short_range.tflite',
+              delegate: 'GPU',
+            },
+            runningMode: 'VIDEO',
+            minDetectionConfidence: 0.35,
+          });
+        } catch {
+          try {
+            detector = await FaceDetector.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath: '/blaze_face_short_range.tflite',
+                delegate: 'CPU',
+              },
+              runningMode: 'VIDEO',
+              minDetectionConfidence: 0.35,
+            });
+          } catch {
+            detector = await FaceDetector.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',
+                delegate: 'CPU',
+              },
+              runningMode: 'VIDEO',
+              minDetectionConfidence: 0.35,
+            });
+          }
+        }
+
+        if (isMounted && detector) {
+          mpDetectorRef.current = detector;
+        }
+      } catch (err) {
+        console.warn('MediaPipe initialization fallback notice:', err);
+      } finally {
+        mpLoadingRef.current = false;
+      }
+    };
+
+    initMediaPipeDetector();
+
+    return () => {
+      isMounted = false;
+      if (mpDetectorRef.current) {
+        try {
+          mpDetectorRef.current.close();
+        } catch {}
+        mpDetectorRef.current = null;
+      }
+    };
+  }, []);
 
   // Client-side real-time multi-face & biometric expression detector
   const analyzeClientSideFrame = async (ctx: CanvasRenderingContext2D, width: number, height: number) => {
@@ -254,7 +322,131 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       const cWidth = cRect?.width || 320;
       const cHeight = cRect?.height || 190;
 
-      // ── Option A: Native Browser Hardware-Accelerated Multi-FaceDetector API (if supported) ──
+      // ── Tier 1: MediaPipe BlazeFace Deep Learning Detector (Pinpoint Accurate & Fast) ──
+      if (mpDetectorRef.current && videoRef.current && videoRef.current.readyState >= 2) {
+        try {
+          const mpResult = mpDetectorRef.current.detectForVideo(videoRef.current, performance.now());
+          const detectedFaces = mpResult?.detections;
+
+          if (detectedFaces && detectedFaces.length > 0) {
+            const vw = videoRef.current.videoWidth || width;
+            const vh = videoRef.current.videoHeight || height;
+
+            const trackedFaces: TrackedFaceItem[] = [];
+            let primaryScores: Record<string, number> | undefined = undefined;
+
+            for (let i = 0; i < detectedFaces.length; i++) {
+              const face = detectedFaces[i];
+              const bbox = face.boundingBox;
+              if (!bbox || bbox.width <= 0 || bbox.height <= 0) continue;
+
+              const normX = Math.max(0, Math.min(0.95, bbox.originX / vw));
+              const normY = Math.max(0, Math.min(0.95, bbox.originY / vh));
+              const normW = Math.max(0.05, Math.min(1 - normX, bbox.width / vw));
+              const normH = Math.max(0.05, Math.min(1 - normY, bbox.height / vh));
+
+              if (i === 0) {
+                lastDetectedNormBoxRef.current = { x: normX, y: normY, w: normW, h: normH };
+              }
+
+              const coverBox = computeVideoCoverRect(normX, normY, normW, normH, vw, vh, cWidth, cHeight, true);
+
+              // Apply EMA smoothing to eliminate jitter while following movements
+              let finalBox = coverBox;
+              if (i === 0) {
+                if (smoothedBoxRef.current) {
+                  const dx = Math.abs(smoothedBoxRef.current.x - coverBox.x);
+                  const dy = Math.abs(smoothedBoxRef.current.y - coverBox.y);
+                  const alpha = (dx > 18 || dy > 18) ? 0.80 : 0.45;
+                  smoothedBoxRef.current = {
+                    x: smoothedBoxRef.current.x * (1 - alpha) + coverBox.x * alpha,
+                    y: smoothedBoxRef.current.y * (1 - alpha) + coverBox.y * alpha,
+                    width: smoothedBoxRef.current.width * (1 - alpha) + coverBox.width * alpha,
+                    height: smoothedBoxRef.current.height * (1 - alpha) + coverBox.height * alpha,
+                  };
+                } else {
+                  smoothedBoxRef.current = { ...coverBox };
+                }
+
+                finalBox = {
+                  x: Math.round(smoothedBoxRef.current.x * 10) / 10,
+                  y: Math.round(smoothedBoxRef.current.y * 10) / 10,
+                  width: Math.round(smoothedBoxRef.current.width * 10) / 10,
+                  height: Math.round(smoothedBoxRef.current.height * 10) / 10,
+                };
+              }
+
+              // Crop face region for expression analysis
+              const cropX = Math.max(0, Math.floor(normX * width));
+              const cropY = Math.max(0, Math.floor(normY * height));
+              const cropW = Math.min(width - cropX, Math.floor(normW * width));
+              const cropH = Math.min(height - cropY, Math.floor(normH * height));
+
+              let rawEmotion = 'neutral';
+              let rawConf = face.categories?.[0]?.score || 0.94;
+
+              if (cropW > 8 && cropH > 8) {
+                const faceImgData = ctx.getImageData(cropX, cropY, cropW, cropH);
+                const { emotion, conf, scores } = estimateExpressionFromImageData(
+                  faceImgData.data,
+                  cropW,
+                  cropH,
+                  0,
+                  0,
+                  cropW,
+                  cropH
+                );
+                rawEmotion = emotion;
+                rawConf = Math.min(0.98, Math.max(0.85, (face.categories?.[0]?.score || 0.90) * 0.4 + conf * 0.6));
+                if (i === 0) primaryScores = scores;
+              }
+
+              // Live biometric signature recognition
+              const liveSignature = extractClientFaceSignature(
+                ctx.getImageData(0, 0, width, height).data,
+                width,
+                height,
+                cropX,
+                cropY,
+                cropW,
+                cropH
+              );
+
+              // Auto-seed owner baseline on initial load if no profile exists yet
+              if (faceProfiles.length === 0 && liveSignature && liveSignature.length > 0 && i === 0) {
+                const initialOwner = registeredFaces[0] || 'Kavihai Arasu (Owner)';
+                const initialProf = [{ name: initialOwner, embedding: liveSignature }];
+                setFaceProfiles(initialProf);
+                try {
+                  localStorage.setItem('markus_known_face_profiles', JSON.stringify(initialProf));
+                } catch {}
+              }
+
+              const recognized = matchClientFace(liveSignature, faceProfiles);
+              const isKnown = recognized.isKnown;
+              const identityName = isKnown ? recognized.name : 'Unknown';
+              const displayLabel = isKnown ? recognized.name : (i === 0 ? 'Unknown' : `Unknown (#${i + 1})`);
+
+              trackedFaces.push({
+                trackId: i + 1,
+                identity: identityName,
+                label: displayLabel,
+                expression: rawEmotion,
+                confidence: roundDec(Math.max(rawConf, recognized.confidence), 2),
+                box: finalBox,
+              });
+            }
+
+            if (trackedFaces.length > 0) {
+              return applyDetectedFaces(trackedFaces, primaryScores);
+            }
+          }
+        } catch (mpErr) {
+          console.warn('MediaPipe detection frame notice:', mpErr);
+        }
+      }
+
+      // ── Tier 2: Native Browser Hardware-Accelerated Multi-FaceDetector API (if supported) ──
       if (typeof (window as any).FaceDetector === 'function' && videoRef.current) {
         try {
           const detector = new (window as any).FaceDetector({ fastMode: true, maxDetectedFaces: 10 });
@@ -271,12 +463,40 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
               const face = detectedNativeFaces[i];
               const box = face.boundingBox;
 
-              const normX = box.x / vw;
-              const normY = box.y / vh;
-              const normW = box.width / vw;
-              const normH = box.height / vh;
+              const normX = Math.max(0, Math.min(0.95, box.x / vw));
+              const normY = Math.max(0, Math.min(0.95, box.y / vh));
+              const normW = Math.max(0.05, Math.min(1 - normX, box.width / vw));
+              const normH = Math.max(0.05, Math.min(1 - normY, box.height / vh));
+
+              if (i === 0) {
+                lastDetectedNormBoxRef.current = { x: normX, y: normY, w: normW, h: normH };
+              }
 
               const coverBox = computeVideoCoverRect(normX, normY, normW, normH, vw, vh, cWidth, cHeight, true);
+
+              let finalBox = coverBox;
+              if (i === 0) {
+                if (smoothedBoxRef.current) {
+                  const dx = Math.abs(smoothedBoxRef.current.x - coverBox.x);
+                  const dy = Math.abs(smoothedBoxRef.current.y - coverBox.y);
+                  const alpha = (dx > 18 || dy > 18) ? 0.80 : 0.45;
+                  smoothedBoxRef.current = {
+                    x: smoothedBoxRef.current.x * (1 - alpha) + coverBox.x * alpha,
+                    y: smoothedBoxRef.current.y * (1 - alpha) + coverBox.y * alpha,
+                    width: smoothedBoxRef.current.width * (1 - alpha) + coverBox.width * alpha,
+                    height: smoothedBoxRef.current.height * (1 - alpha) + coverBox.height * alpha,
+                  };
+                } else {
+                  smoothedBoxRef.current = { ...coverBox };
+                }
+
+                finalBox = {
+                  x: Math.round(smoothedBoxRef.current.x * 10) / 10,
+                  y: Math.round(smoothedBoxRef.current.y * 10) / 10,
+                  width: Math.round(smoothedBoxRef.current.width * 10) / 10,
+                  height: Math.round(smoothedBoxRef.current.height * 10) / 10,
+                };
+              }
 
               // Crop face region for expression analysis
               const cropX = Math.max(0, Math.floor(normX * width));
@@ -289,18 +509,51 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
 
               if (cropW > 8 && cropH > 8) {
                 const faceImgData = ctx.getImageData(cropX, cropY, cropW, cropH);
-                const { emotion, conf, scores } = estimateExpressionFromImageData(faceImgData.data, cropW, cropH);
+                const { emotion, conf, scores } = estimateExpressionFromImageData(
+                  faceImgData.data,
+                  cropW,
+                  cropH,
+                  0,
+                  0,
+                  cropW,
+                  cropH
+                );
                 rawEmotion = emotion;
                 rawConf = conf;
                 if (i === 0) primaryScores = scores;
               }
 
+              const liveSignature = extractClientFaceSignature(
+                ctx.getImageData(0, 0, width, height).data,
+                width,
+                height,
+                cropX,
+                cropY,
+                cropW,
+                cropH
+              );
+              // Auto-seed owner baseline on initial load if no profile exists yet
+              if (faceProfiles.length === 0 && liveSignature && liveSignature.length > 0 && i === 0) {
+                const initialOwner = registeredFaces[0] || 'Kavihai Arasu (Owner)';
+                const initialProf = [{ name: initialOwner, embedding: liveSignature }];
+                setFaceProfiles(initialProf);
+                try {
+                  localStorage.setItem('markus_known_face_profiles', JSON.stringify(initialProf));
+                } catch {}
+              }
+
+              const recognized = matchClientFace(liveSignature, faceProfiles);
+              const isKnown = recognized.isKnown;
+              const identityName = isKnown ? recognized.name : 'Unknown';
+              const displayLabel = isKnown ? recognized.name : (i === 0 ? 'Unknown' : `Unknown (#${i + 1})`);
+
               trackedFaces.push({
                 trackId: i + 1,
-                label: registeredFaces[i] || `FACE #${i + 1}`,
+                identity: identityName,
+                label: displayLabel,
                 expression: rawEmotion,
-                confidence: roundDec(rawConf, 2),
-                box: coverBox,
+                confidence: roundDec(Math.max(rawConf, recognized.confidence), 2),
+                box: finalBox,
               });
             }
 
@@ -309,15 +562,14 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
         } catch {}
       }
 
-      // ── Option B: Robust Multi-Scale Integral Biometric & Contrast-Equalized Face Detector ──
+      // ── Tier 3: Robust Skin-Chroma (YCrCb + RGB) & Facial Structure Biometric Fallback ──
       const imgData = ctx.getImageData(0, 0, width, height);
       const data = imgData.data;
 
-      // 1. Build Luminance and Integral Image with Dynamic Contrast Normalization
-      // This handles backlit rooms, dark skin tones, glasses, and strong window glare
+      // 1. Build Skin Chrominance Map with human biological RGB + YCrCb constraints
+      const skinGrid = new Uint8Array(width * height);
       const lumGrid = new Float32Array(width * height);
-      let minLum = 255;
-      let maxLum = 0;
+      let skinPixelCount = 0;
 
       for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
@@ -325,56 +577,74 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
           const r = data[idx];
           const g = data[idx + 1];
           const b = data[idx + 2];
+
+          // YCrCb color space conversion
           const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          const cr = (r - lum) * 0.713 + 128;
+          const cb = (b - lum) * 0.564 + 128;
+
           lumGrid[y * width + x] = lum;
-          if (lum < minLum) minLum = lum;
-          if (lum > maxLum) maxLum = lum;
+
+          // Reject non-skin objects (white tiles, gray walls, furniture, curtains)
+          // Human skin across all ethnicities requires: r > g, r > b, cr in [132, 176], cb in [78, 130]
+          const isSkinChroma =
+            r > g &&
+            r > b &&
+            (r - g) >= 3 &&
+            (r - b) >= 6 &&
+            cr >= 132 &&
+            cr <= 176 &&
+            cb >= 78 &&
+            cb <= 130 &&
+            lum >= 25 &&
+            lum <= 235;
+
+          if (isSkinChroma) {
+            skinGrid[y * width + x] = 1;
+            skinPixelCount++;
+          }
         }
       }
 
-      // Stretch contrast dynamic range for backlit / underexposed faces
-      const lumRange = Math.max(20, maxLum - minLum);
-      const normLum = new Float32Array(width * height);
-      for (let i = 0; i < lumGrid.length; i++) {
-        normLum[i] = ((lumGrid[i] - minLum) / lumRange) * 255;
-      }
+      // Build 2D Integral Images for both Skin Density and Luminance
+      const skinIntegral = new Float64Array((width + 1) * (height + 1));
+      const lumIntegral = new Float64Array((width + 1) * (height + 1));
 
-      // Build 2D Integral Image for sub-millisecond rectangular region luminance queries
-      const integral = new Float64Array((width + 1) * (height + 1));
       for (let y = 0; y < height; y++) {
-        let rowSum = 0;
+        let rowSkin = 0;
+        let rowLum = 0;
         for (let x = 0; x < width; x++) {
-          rowSum += normLum[y * width + x];
-          integral[(y + 1) * (width + 1) + (x + 1)] =
-            integral[y * (width + 1) + (x + 1)] + rowSum;
+          rowSkin += skinGrid[y * width + x];
+          rowLum += lumGrid[y * width + x];
+          const idx = (y + 1) * (width + 1) + (x + 1);
+          skinIntegral[idx] = skinIntegral[y * (width + 1) + (x + 1)] + rowSkin;
+          lumIntegral[idx] = lumIntegral[y * (width + 1) + (x + 1)] + rowLum;
         }
       }
 
-      const getRectSum = (rx: number, ry: number, rw: number, rh: number): number => {
+      const getSkinDensity = (rx: number, ry: number, rw: number, rh: number): number => {
         const x1 = Math.max(0, Math.min(width, Math.floor(rx)));
         const y1 = Math.max(0, Math.min(height, Math.floor(ry)));
         const x2 = Math.max(0, Math.min(width, Math.floor(rx + rw)));
         const y2 = Math.max(0, Math.min(height, Math.floor(ry + rh)));
         const stride = width + 1;
-        return (
-          integral[y2 * stride + x2] -
-          integral[y1 * stride + x2] -
-          integral[y2 * stride + x1] +
-          integral[y1 * stride + x1]
-        );
+        const totalSkin = skinIntegral[y2 * stride + x2] - skinIntegral[y1 * stride + x2] - skinIntegral[y2 * stride + x1] + skinIntegral[y1 * stride + x1];
+        const area = Math.max(1, (x2 - x1) * (y2 - y1));
+        return totalSkin / area;
       };
 
-      const getRectAvg = (rx: number, ry: number, rw: number, rh: number): number => {
-        const area = Math.max(1, Math.floor(rw) * Math.floor(rh));
-        return getRectSum(rx, ry, rw, rh) / area;
+      const getLumAvg = (rx: number, ry: number, rw: number, rh: number): number => {
+        const x1 = Math.max(0, Math.min(width, Math.floor(rx)));
+        const y1 = Math.max(0, Math.min(height, Math.floor(ry)));
+        const x2 = Math.max(0, Math.min(width, Math.floor(rx + rw)));
+        const y2 = Math.max(0, Math.min(height, Math.floor(ry + rh)));
+        const stride = width + 1;
+        const totalLum = lumIntegral[y2 * stride + x2] - lumIntegral[y1 * stride + x2] - lumIntegral[y2 * stride + x1] + lumIntegral[y1 * stride + x1];
+        const area = Math.max(1, (x2 - x1) * (y2 - y1));
+        return totalLum / area;
       };
 
-      // 2. Multi-Scale Biometric Face Pattern Search (Haar/Viola-Jones inspired)
-      // Checks candidate face windows for universal facial structure:
-      // - Eye socket & brow depression (darker band)
-      // - Forehead & cheek/nose bridge ridge (brighter band)
-      // - Bilateral horizontal symmetry
-      // - Silhouette / head contour
+      // 2. Multi-Scale Biometric Face Pattern Search with Skin Prior
       let bestScore = -999;
       let bestBox = { x: width * 0.25, y: height * 0.12, w: width * 0.50, h: height * 0.65 };
       let faceFound = false;
@@ -382,57 +652,64 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       const scales = [
         { w: Math.floor(width * 0.32), h: Math.floor(height * 0.46) },
         { w: Math.floor(width * 0.42), h: Math.floor(height * 0.58) },
-        { w: Math.floor(width * 0.52), h: Math.floor(height * 0.68) },
-        { w: Math.floor(width * 0.62), h: Math.floor(height * 0.78) },
+        { w: Math.floor(width * 0.52), h: Math.floor(height * 0.70) },
       ];
 
       for (const scale of scales) {
-        const stepX = Math.max(6, Math.floor(scale.w * 0.12));
-        const stepY = Math.max(6, Math.floor(scale.h * 0.12));
+        const stepX = Math.max(8, Math.floor(scale.w * 0.15));
+        const stepY = Math.max(8, Math.floor(scale.h * 0.15));
         const maxX = width - scale.w;
         const maxY = height - scale.h;
 
-        for (let cy = Math.floor(height * 0.04); cy <= maxY; cy += stepY) {
+        for (let cy = Math.floor(height * 0.05); cy <= maxY; cy += stepY) {
           for (let cx = Math.floor(width * 0.08); cx <= maxX; cx += stepX) {
             const fw = scale.w;
             const fh = scale.h;
 
-            // Region averages
-            const forehead = getRectAvg(cx + fw * 0.20, cy + fh * 0.06, fw * 0.60, fh * 0.18);
-            const eyeLeft = getRectAvg(cx + fw * 0.14, cy + fh * 0.26, fw * 0.32, fh * 0.20);
-            const eyeRight = getRectAvg(cx + fw * 0.54, cy + fh * 0.26, fw * 0.32, fh * 0.20);
-            const noseBridge = getRectAvg(cx + fw * 0.36, cy + fh * 0.28, fw * 0.28, fh * 0.32);
-            const mouthArea = getRectAvg(cx + fw * 0.22, cy + fh * 0.64, fw * 0.56, fh * 0.22);
-            const cheekLeft = getRectAvg(cx + fw * 0.10, cy + fh * 0.48, fw * 0.26, fh * 0.24);
-            const cheekRight = getRectAvg(cx + fw * 0.64, cy + fh * 0.48, fw * 0.26, fh * 0.24);
+            const skinDensity = getSkinDensity(cx, cy, fw, fh);
+            if (skinPixelCount > 300 && skinDensity < 0.22) {
+              continue;
+            }
+
+            const forehead = getLumAvg(cx + fw * 0.20, cy + fh * 0.06, fw * 0.60, fh * 0.18);
+            const eyeLeft = getLumAvg(cx + fw * 0.14, cy + fh * 0.26, fw * 0.32, fh * 0.20);
+            const eyeRight = getLumAvg(cx + fw * 0.54, cy + fh * 0.26, fw * 0.32, fh * 0.20);
+            const noseBridge = getLumAvg(cx + fw * 0.36, cy + fh * 0.28, fw * 0.28, fh * 0.32);
+            const cheekLeft = getLumAvg(cx + fw * 0.10, cy + fh * 0.48, fw * 0.26, fh * 0.24);
+            const cheekRight = getLumAvg(cx + fw * 0.64, cy + fh * 0.48, fw * 0.26, fh * 0.24);
 
             const avgEyes = (eyeLeft + eyeRight) / 2;
             const avgCheeks = (cheekLeft + cheekRight) / 2;
 
-            // Universal biometric contrast differential:
-            // 1. Forehead is brighter than eye socket / glasses band
             const browEyeDiff = forehead - avgEyes;
-            // 2. Nose bridge and cheeks are brighter than eye depression
-            const noseEyeDiff = (noseBridge + avgCheeks) / 2 - avgEyes;
-            // 3. Bilateral symmetry between left and right facial halves
+            // Artificial step edge penalty: wall tile borders have huge contrast > 55
+            const browScore = (browEyeDiff >= 5 && browEyeDiff <= 55)
+              ? browEyeDiff * 1.0
+              : (browEyeDiff > 55 ? Math.max(-60, 55 - (browEyeDiff - 55) * 2.5) : -20);
+
+            // Nose bridge is brighter than eyes in a 3D human face
+            const noseEyeDiff = Math.max(-10, Math.min(40, (noseBridge + avgCheeks) / 2 - avgEyes));
             const eyeSymmetry = 100 - Math.abs(eyeLeft - eyeRight);
             const cheekSymmetry = 100 - Math.abs(cheekLeft - cheekRight);
-            // 4. Center proximity prior (laptop users sit centrally)
+
+            // Center proximity prior (laptop webcam users sit centrally)
             const centerX = cx + fw / 2;
             const centerDist = Math.abs(centerX - width / 2) / (width / 2);
-            const centerBonus = (1 - centerDist) * 20;
+            const centerBonus = (1 - centerDist) * 35;
 
-            // Composite Biometric Face Score
+            const skinScore = skinDensity * 50;
+
             const biometricScore =
-              browEyeDiff * 1.4 +
-              noseEyeDiff * 1.6 +
-              (eyeSymmetry + cheekSymmetry) * 0.25 +
+              skinScore +
+              browScore +
+              noseEyeDiff * 1.5 +
+              (eyeSymmetry + cheekSymmetry) * 0.15 +
               centerBonus;
 
             if (biometricScore > bestScore) {
               bestScore = biometricScore;
               bestBox = { x: cx, y: cy, w: fw, h: fh };
-              if (biometricScore > -5) {
+              if (biometricScore >= 25 && skinDensity >= 0.25) {
                 faceFound = true;
               }
             }
@@ -440,25 +717,15 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
         }
       }
 
-      // 3. Fallback check: Subject in Camera View
-      // Always guarantee subject tracking when camera is active
-      if (!faceFound || bestScore < -20) {
-        faceFound = true;
-        bestBox = {
-          x: width * 0.22,
-          y: height * 0.08,
-          w: width * 0.54,
-          h: height * 0.72,
-        };
-      }
-
-      if (faceFound) {
+      if (faceFound && bestScore >= 25) {
         consecutiveMissesRef.current = 0;
 
         const normW = bestBox.w / width;
         const normH = bestBox.h / height;
         const normX = bestBox.x / width;
         const normY = bestBox.y / height;
+
+        lastDetectedNormBoxRef.current = { x: normX, y: normY, w: normW, h: normH };
 
         const coverBox = computeVideoCoverRect(
           normX,
@@ -478,7 +745,9 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
 
         // Smooth bounding box via Exponential Moving Average (EMA) to eliminate jitter
         if (smoothedBoxRef.current) {
-          const alpha = 0.40;
+          const dx = Math.abs(smoothedBoxRef.current.x - rawTargetX);
+          const dy = Math.abs(smoothedBoxRef.current.y - rawTargetY);
+          const alpha = (dx > 18 || dy > 18) ? 0.80 : 0.45;
           smoothedBoxRef.current = {
             x: smoothedBoxRef.current.x * (1 - alpha) + rawTargetX * alpha,
             y: smoothedBoxRef.current.y * (1 - alpha) + rawTargetY * alpha,
@@ -520,12 +789,23 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
           bestBox.w,
           bestBox.h
         );
+        // Auto-seed owner baseline on initial load if no profile exists yet
+        if (faceProfiles.length === 0 && liveSignature && liveSignature.length > 0) {
+          const initialOwner = registeredFaces[0] || 'Kavihai Arasu (Owner)';
+          const initialProf = [{ name: initialOwner, embedding: liveSignature }];
+          setFaceProfiles(initialProf);
+          try {
+            localStorage.setItem('markus_known_face_profiles', JSON.stringify(initialProf));
+          } catch {}
+        }
+
         const recognized = matchClientFace(liveSignature, faceProfiles);
+        const identityName = recognized.isKnown ? recognized.name : 'Unknown';
 
         const singleFace: TrackedFaceItem = {
           trackId: 1,
-          identity: recognized.name,
-          label: recognized.name,
+          identity: identityName,
+          label: identityName,
           expression: emotion,
           confidence: roundDec(Math.max(conf, recognized.confidence), 2),
           box: {
@@ -539,9 +819,9 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
         return applyDetectedFaces([singleFace], scores);
       } else {
         consecutiveMissesRef.current += 1;
-        // Persistence window: keep previous tracking for ~3 seconds before resetting
-        if (consecutiveMissesRef.current > 25) {
+        if (consecutiveMissesRef.current > 15) {
           smoothedBoxRef.current = null;
+          lastDetectedNormBoxRef.current = null;
           setFaceCount(0);
           setFaces([]);
           setExpression('neutral');
@@ -566,15 +846,20 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
     boxW: number = width,
     boxH: number = height,
   ): { emotion: string; conf: number; scores: Record<string, number> } => {
-    // 1. Eyes and Brow Region Analysis (top 18% to 45% of face)
-    const browYStart = Math.floor(boxY + boxH * 0.18);
-    const browYEnd = Math.floor(boxY + boxH * 0.45);
+    // 1. Forehead / Brow & Glabella Region Analysis (top 15% to 42% of face)
+    const browYStart = Math.floor(boxY + boxH * 0.16);
+    const browYEnd = Math.floor(boxY + boxH * 0.42);
     const eyeXStart = Math.floor(boxX + boxW * 0.15);
     const eyeXEnd = Math.floor(boxX + boxW * 0.85);
+    const glabellaXStart = Math.floor(boxX + boxW * 0.38);
+    const glabellaXEnd = Math.floor(boxX + boxW * 0.62);
 
     let eyeBrightness = 0;
     let eyeDarkPixels = 0;
     let eyeSamples = 0;
+    let glabellaBrightness = 0;
+    let glabellaDarkPixels = 0;
+    let glabellaSamples = 0;
 
     for (let ey = browYStart; ey < browYEnd; ey += 2) {
       for (let ex = eyeXStart; ex < eyeXEnd; ex += 2) {
@@ -582,25 +867,57 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
           const idx = (ey * width + ex) * 4;
           const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
           eyeBrightness += lum;
-          if (lum < 48) eyeDarkPixels++;
+          if (lum < 46) eyeDarkPixels++;
           eyeSamples++;
+
+          if (ex >= glabellaXStart && ex <= glabellaXEnd) {
+            glabellaBrightness += lum;
+            if (lum < 52) glabellaDarkPixels++;
+            glabellaSamples++;
+          }
         }
       }
     }
 
     const eyeDarkRatio = eyeSamples > 0 ? eyeDarkPixels / eyeSamples : 0;
+    const glabellaDarkRatio = glabellaSamples > 0 ? glabellaDarkPixels / glabellaSamples : 0;
 
-    // 2. Mouth Region Analysis (bottom 55% to 92% of face)
-    const mouthYStart = Math.floor(boxY + boxH * 0.56);
-    const mouthYEnd = Math.floor(boxY + boxH * 0.92);
-    const mouthXStart = Math.floor(boxX + boxW * 0.16);
-    const mouthXEnd = Math.floor(boxX + boxW * 0.84);
+    // 2. Cheeks Region Analysis (middle 45% to 68% of face)
+    const cheekYStart = Math.floor(boxY + boxH * 0.45);
+    const cheekYEnd = Math.floor(boxY + boxH * 0.68);
+    let cheekBrightness = 0;
+    let cheekSamples = 0;
+
+    for (let cy = cheekYStart; cy < cheekYEnd; cy += 2) {
+      for (let cx = eyeXStart; cx < eyeXEnd; cx += 2) {
+        if (cx >= 0 && cx < width && cy >= 0 && cy < height) {
+          const idx = (cy * width + cx) * 4;
+          const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+          cheekBrightness += lum;
+          cheekSamples++;
+        }
+      }
+    }
+    const avgCheekLum = cheekSamples > 0 ? cheekBrightness / cheekSamples : 100;
+    const avgForeheadLum = eyeSamples > 0 ? eyeBrightness / eyeSamples : 100;
+    const cheekLiftContrast = avgCheekLum - avgForeheadLum;
+
+    // 3. Mouth Region Analysis (bottom 60% to 94% of face)
+    const mouthYStart = Math.floor(boxY + boxH * 0.60);
+    const mouthYEnd = Math.floor(boxY + boxH * 0.94);
+    const mouthXStart = Math.floor(boxX + boxW * 0.18);
+    const mouthXEnd = Math.floor(boxX + boxW * 0.82);
+    const mouthMidX = (mouthXStart + mouthXEnd) / 2;
+    const mouthCenterW = (mouthXEnd - mouthXStart) * 0.35;
 
     let mouthBrightness = 0;
     let mouthDarkCavity = 0;
     let mouthSamples = 0;
-    let mouthSpread = 0;
-    let leftMouthLum = 0, rightMouthLum = 0, leftSamples = 0, rightSamples = 0;
+    let mouthCenterLum = 0;
+    let mouthCenterSamples = 0;
+    let mouthCornerLum = 0;
+    let mouthCornerSamples = 0;
+    let brightTeethPixels = 0;
 
     for (let my = mouthYStart; my < mouthYEnd; my += 2) {
       for (let mx = mouthXStart; mx < mouthXEnd; mx += 2) {
@@ -608,67 +925,85 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
           const idx = (my * width + mx) * 4;
           const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
           mouthBrightness += lum;
-          if (lum < 42) mouthDarkCavity++;
-          if (lum > 125) mouthSpread++;
+          if (lum < 38) mouthDarkCavity++;
           mouthSamples++;
 
-          if (mx < (mouthXStart + mouthXEnd) / 2) {
-            leftMouthLum += lum;
-            leftSamples++;
+          const isCenter = Math.abs(mx - mouthMidX) < mouthCenterW / 2;
+          if (isCenter) {
+            mouthCenterLum += lum;
+            mouthCenterSamples++;
+            if (lum > 140) brightTeethPixels++;
           } else {
-            rightMouthLum += lum;
-            rightSamples++;
+            mouthCornerLum += lum;
+            mouthCornerSamples++;
           }
         }
       }
     }
 
-    const avgMouthLum = mouthSamples > 0 ? mouthBrightness / mouthSamples : 95;
+    const avgMouthLum = mouthSamples > 0 ? mouthBrightness / mouthSamples : 90;
+    const avgCenterLum = mouthCenterSamples > 0 ? mouthCenterLum / mouthCenterSamples : 90;
+    const avgCornerLum = mouthCornerSamples > 0 ? mouthCornerLum / mouthCornerSamples : 90;
     const mouthOpenRatio = mouthSamples > 0 ? mouthDarkCavity / mouthSamples : 0;
-    const smileRatio = mouthSamples > 0 ? mouthSpread / mouthSamples : 0;
-    const asymmetry = Math.abs(
-      (leftSamples > 0 ? leftMouthLum / leftSamples : 0) -
-      (rightSamples > 0 ? rightMouthLum / rightSamples : 0)
-    );
+    const teethRatio = mouthCenterSamples > 0 ? brightTeethPixels / mouthCenterSamples : 0;
+
+    // Relative Mouth Contrast: In a true smile, teeth / mouth center are noticeably brighter than corners
+    const smileContrast = avgCenterLum - avgCornerLum;
 
     const scores: Record<string, number> = {
-      neutral: 0.82,
+      neutral: 0.76,
       happy: 0.05,
       surprised: 0.04,
-      sad: 0.03,
-      angry: 0.03,
-      fearful: 0.02,
-      disgusted: 0.01,
+      sad: 0.04,
+      angry: 0.04,
+      fearful: 0.04,
+      disgusted: 0.03,
     };
 
     let rawEmotion = 'neutral';
-    let rawConf = 0.85;
+    let rawConf = 0.86;
 
-    if (smileRatio > 0.10 || avgMouthLum > 120) {
+    // ── Expression Classifier ──
+    // 1. Happy / Smile: requires teeth contrast OR center brightness higher than corners + cheek lift
+    if ((teethRatio > 0.12 && smileContrast > 14) || (smileContrast > 22 && cheekLiftContrast > 4)) {
       rawEmotion = 'happy';
-      rawConf = Math.min(0.97, 0.74 + smileRatio * 1.5);
+      rawConf = Math.min(0.96, 0.76 + (teethRatio * 1.2) + (smileContrast / 100) * 0.3);
       scores.happy = roundDec(rawConf, 2);
-      scores.neutral = roundDec(Math.max(0.03, 1 - rawConf), 2);
-    } else if (mouthOpenRatio > 0.15 || (mouthOpenRatio > 0.10 && eyeDarkRatio < 0.15)) {
-      rawEmotion = 'surprised';
-      rawConf = Math.min(0.95, 0.73 + mouthOpenRatio * 1.2);
-      scores.surprised = roundDec(rawConf, 2);
       scores.neutral = roundDec(Math.max(0.04, 1 - rawConf), 2);
-    } else if (asymmetry > 30) {
-      rawEmotion = 'disgusted';
-      rawConf = Math.min(0.90, 0.70 + (asymmetry / 100) * 0.4);
-      scores.disgusted = roundDec(rawConf, 2);
+    }
+    // 2. Surprised: vertical mouth cavity opening + open eyes
+    else if (mouthOpenRatio > 0.18 && eyeDarkRatio > 0.18) {
+      rawEmotion = 'surprised';
+      rawConf = Math.min(0.94, 0.74 + mouthOpenRatio * 1.1);
+      scores.surprised = roundDec(rawConf, 2);
       scores.neutral = roundDec(Math.max(0.05, 1 - rawConf), 2);
-    } else if (avgMouthLum < 50 && smileRatio < 0.03) {
-      rawEmotion = 'sad';
-      rawConf = Math.min(0.88, 0.72 + (50 - avgMouthLum) * 0.005);
-      scores.sad = roundDec(rawConf, 2);
-      scores.neutral = roundDec(Math.max(0.06, 1 - rawConf), 2);
-    } else if (eyeDarkRatio > 0.35 && avgMouthLum < 75) {
+    }
+    // 3. Angry / Concentrated: dark glabella furrow between brows + compressed mouth
+    else if (glabellaDarkRatio > 0.30 && avgMouthLum < 75) {
       rawEmotion = 'angry';
-      rawConf = Math.min(0.89, 0.70 + eyeDarkRatio * 0.4);
+      rawConf = Math.min(0.91, 0.72 + glabellaDarkRatio * 0.45);
       scores.angry = roundDec(rawConf, 2);
       scores.neutral = roundDec(Math.max(0.05, 1 - rawConf), 2);
+    }
+    // 4. Sadness: mouth corner droop (corners darker than center) + low mouth energy
+    else if (avgCornerLum < avgCenterLum - 10 && avgMouthLum < 65 && cheekLiftContrast < -3) {
+      rawEmotion = 'sad';
+      rawConf = Math.min(0.88, 0.70 + (70 - avgMouthLum) * 0.005);
+      scores.sad = roundDec(rawConf, 2);
+      scores.neutral = roundDec(Math.max(0.06, 1 - rawConf), 2);
+    }
+    // 5. Fearful: wide eyes + moderate cavity
+    else if (eyeDarkRatio > 0.32 && mouthOpenRatio > 0.08) {
+      rawEmotion = 'fearful';
+      rawConf = Math.min(0.88, 0.70 + eyeDarkRatio * 0.4);
+      scores.fearful = roundDec(rawConf, 2);
+      scores.neutral = roundDec(Math.max(0.05, 1 - rawConf), 2);
+    }
+    // 6. Default: Neutral resting state
+    else {
+      rawEmotion = 'neutral';
+      rawConf = 0.88;
+      scores.neutral = 0.88;
     }
 
     // Normalize all 7 geometric emotion scores into a true probability distribution summing to 1.0 (100%)
@@ -908,10 +1243,17 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
         if (video && canvas && video.readyState >= 2 && video.videoWidth > 0 && !video.paused && !video.ended) {
           const ctx = canvas.getContext('2d', { willReadFrequently: true });
           if (ctx) {
-            canvas.width = 240;
-            canvas.height = 180;
-            ctx.drawImage(video, 0, 0, 240, 180);
-            await analyzeClientSideFrame(ctx, 240, 180);
+            const vw = video.videoWidth;
+            const vh = video.videoHeight;
+            const aspect = vh > 0 ? vw / vh : 4 / 3;
+            const targetW = 320;
+            const targetH = Math.max(160, Math.round(320 / aspect));
+            if (canvas.width !== targetW || canvas.height !== targetH) {
+              canvas.width = targetW;
+              canvas.height = targetH;
+            }
+            ctx.drawImage(video, 0, 0, targetW, targetH);
+            await analyzeClientSideFrame(ctx, targetW, targetH);
           }
         }
       } catch (err) {
@@ -941,184 +1283,206 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
     };
   }, [cameraActive]);
 
-  // Toggle Camera
-  const toggleCamera = async () => {
-    if (cameraActive) {
-      cameraActiveRef.current = false;
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
+  // Stop Camera
+  const stopCamera = async () => {
+    cameraActiveRef.current = false;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    if (backendTimerRef.current) {
+      clearTimeout(backendTimerRef.current);
+      backendTimerRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    smoothedBoxRef.current = null;
+    setCameraActive(false);
+    setFaceCount(0);
+    setFaces([]);
+    setHedgedText('Webcam paused');
+    try {
+      await fetch('/api/vision/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: false }),
+      });
+    } catch {}
+  };
+
+  // Start Camera
+  const startCamera = async () => {
+    if (cameraActiveRef.current && streamRef.current?.active) return;
+    try {
+      setHedgedText('Starting camera...');
+      let stream: MediaStream | null = null;
+
+      // 1. Enumerate available video devices
+      const initialDevices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+      const videoDevs = initialDevices.filter(d => d.kind === 'videoinput');
+
+      // Check if saved preferred camera still exists
+      let savedId = '';
+      try {
+        savedId = localStorage.getItem('markus_preferred_camera') || '';
+      } catch {}
+
+      let targetId = '';
+      if (savedId && videoDevs.some(d => d.deviceId === savedId)) {
+        targetId = savedId;
+      } else if (selectedCameraId && videoDevs.some(d => d.deviceId === selectedCameraId)) {
+        targetId = selectedCameraId;
       }
-      if (timerRef.current) {
-        clearTimeout(timerRef.current);
-        timerRef.current = null;
+
+      // Find laptop integrated webcam candidate
+      const laptopCam = videoDevs.find(d => isLaptopIntegratedCam(d.label)) ||
+        videoDevs.find(d => d.label && !isMobileOrLinkedCamera(d.label));
+
+      if (laptopCam && laptopCam.deviceId) {
+        targetId = laptopCam.deviceId;
       }
-      if (backendTimerRef.current) {
-        clearTimeout(backendTimerRef.current);
-        backendTimerRef.current = null;
+
+      // Level 1: Target specific laptop camera by deviceId
+      if (targetId) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { deviceId: { ideal: targetId }, width: { ideal: 640 }, height: { ideal: 480 } },
+            audio: false,
+          });
+        } catch {}
       }
+
+      // Level 2: Try each non-phone candidate in videoDevs
+      if (!stream && videoDevs.length > 0) {
+        const nonPhoneList = videoDevs.filter(d => !isMobileOrLinkedCamera(d.label));
+        const listToTry = nonPhoneList.length > 0 ? nonPhoneList : videoDevs;
+
+        for (const dev of listToTry) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: { deviceId: { ideal: dev.deviceId }, width: { ideal: 640 }, height: { ideal: 480 } },
+              audio: false,
+            });
+            if (stream) {
+              targetId = dev.deviceId;
+              break;
+            }
+          } catch {}
+        }
+      }
+
+      // Level 3: Fallback to standard user-facing or general camera
+      if (!stream) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'user' }, width: { ideal: 640 }, height: { ideal: 480 } },
+            audio: false,
+          });
+        } catch {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        }
+      }
+
+      if (!stream) throw new Error('No video stream received from camera');
+
+      // Refresh device list now that permissions reveal all labels
+      const allDevices = await refreshCameraDevices();
+      const activeTrack = stream.getVideoTracks()[0];
+      const activeLabel = activeTrack ? (activeTrack.label || '') : '';
+
+      // If the active track is a mobile / phone camera and a built-in laptop camera is available, switch gracefully
+      if (isMobileOrLinkedCamera(activeLabel)) {
+        const freshLaptopCam = allDevices.find(d => !isMobileOrLinkedCamera(d.label));
+        if (freshLaptopCam && freshLaptopCam.deviceId) {
+          try {
+            const laptopStream = await navigator.mediaDevices.getUserMedia({
+              video: { deviceId: { ideal: freshLaptopCam.deviceId }, width: { ideal: 640 }, height: { ideal: 480 } },
+              audio: false,
+            });
+            if (laptopStream) {
+              stream.getTracks().forEach(t => t.stop());
+              stream = laptopStream;
+              targetId = freshLaptopCam.deviceId;
+              setSelectedCameraId(freshLaptopCam.deviceId);
+              try {
+                localStorage.setItem('markus_preferred_camera', freshLaptopCam.deviceId);
+              } catch {}
+            }
+          } catch {}
+        }
+      } else if (targetId) {
+        setSelectedCameraId(targetId);
+        try {
+          localStorage.setItem('markus_preferred_camera', targetId);
+        } catch {}
+      }
+
+      const freshTrack = stream.getVideoTracks()[0];
+      if (freshTrack) {
+        freshTrack.onended = () => {
+          if (cameraActiveRef.current) {
+            setTimeout(() => {
+              if (cameraActiveRef.current) startCamera();
+            }, 1000);
+          }
+        };
+      }
+
+      streamRef.current = stream;
+      cameraActiveRef.current = true;
       if (videoRef.current) {
-        videoRef.current.srcObject = null;
+        videoRef.current.srcObject = stream;
+        videoRef.current.muted = true;
+        try {
+          await videoRef.current.play();
+        } catch {
+          videoRef.current.play().catch(() => {});
+        }
       }
-      smoothedBoxRef.current = null;
-      setCameraActive(false);
+
+      setCameraActive(true);
       setFaceCount(0);
-      setFaces([]);
-      setHedgedText('Webcam paused');
+      setHedgedText('Camera active — tracking faces and expressions...');
+
       try {
         await fetch('/api/vision/toggle', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: false }),
+          body: JSON.stringify({ enabled: true, emotion_enabled: emotionActive }),
         });
       } catch {}
-    } else {
-      try {
-        setHedgedText('Starting camera...');
-        let stream: MediaStream | null = null;
-
-        // 1. Enumerate available video devices
-        const initialDevices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
-        const videoDevs = initialDevices.filter(d => d.kind === 'videoinput');
-
-        // Check if saved preferred camera still exists
-        let savedId = '';
-        try {
-          savedId = localStorage.getItem('markus_preferred_camera') || '';
-        } catch {}
-
-        let targetId = '';
-        if (savedId && videoDevs.some(d => d.deviceId === savedId)) {
-          targetId = savedId;
-        } else if (selectedCameraId && videoDevs.some(d => d.deviceId === selectedCameraId)) {
-          targetId = selectedCameraId;
-        }
-
-        // Find laptop integrated webcam candidate
-        const laptopCam = videoDevs.find(d => isLaptopIntegratedCam(d.label)) ||
-          videoDevs.find(d => d.label && !isMobileOrLinkedCamera(d.label));
-
-        if (laptopCam && laptopCam.deviceId) {
-          targetId = laptopCam.deviceId;
-        }
-
-        // Level 1: Target specific laptop camera by deviceId
-        if (targetId) {
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: { deviceId: { ideal: targetId }, width: { ideal: 640 }, height: { ideal: 480 } },
-              audio: false,
-            });
-          } catch {}
-        }
-
-        // Level 2: Try each non-phone candidate in videoDevs
-        if (!stream && videoDevs.length > 0) {
-          const nonPhoneList = videoDevs.filter(d => !isMobileOrLinkedCamera(d.label));
-          const listToTry = nonPhoneList.length > 0 ? nonPhoneList : videoDevs;
-
-          for (const dev of listToTry) {
-            try {
-              stream = await navigator.mediaDevices.getUserMedia({
-                video: { deviceId: { ideal: dev.deviceId }, width: { ideal: 640 }, height: { ideal: 480 } },
-                audio: false,
-              });
-              if (stream) {
-                targetId = dev.deviceId;
-                break;
-              }
-            } catch {}
-          }
-        }
-
-        // Level 3: Fallback to standard user-facing or general camera
-        if (!stream) {
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: { ideal: 'user' }, width: { ideal: 640 }, height: { ideal: 480 } },
-              audio: false,
-            });
-          } catch {
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: true,
-              audio: false,
-            });
-          }
-        }
-
-        if (!stream) throw new Error('No video stream received from camera');
-
-        // Refresh device list now that permissions reveal all labels
-        const allDevices = await refreshCameraDevices();
-        const activeTrack = stream.getVideoTracks()[0];
-        const activeLabel = activeTrack ? (activeTrack.label || '') : '';
-
-        // If the active track is a mobile / phone camera and a built-in laptop camera is available, switch gracefully
-        if (isMobileOrLinkedCamera(activeLabel)) {
-          const freshLaptopCam = allDevices.find(d => !isMobileOrLinkedCamera(d.label));
-          if (freshLaptopCam && freshLaptopCam.deviceId) {
-            try {
-              const laptopStream = await navigator.mediaDevices.getUserMedia({
-                video: { deviceId: { ideal: freshLaptopCam.deviceId }, width: { ideal: 640 }, height: { ideal: 480 } },
-                audio: false,
-              });
-              if (laptopStream) {
-                stream.getTracks().forEach(t => t.stop());
-                stream = laptopStream;
-                targetId = freshLaptopCam.deviceId;
-                setSelectedCameraId(freshLaptopCam.deviceId);
-                try {
-                  localStorage.setItem('markus_preferred_camera', freshLaptopCam.deviceId);
-                } catch {}
-              }
-            } catch {}
-          }
-        } else if (targetId) {
-          setSelectedCameraId(targetId);
-          try {
-            localStorage.setItem('markus_preferred_camera', targetId);
-          } catch {}
-        }
-
-        streamRef.current = stream;
-        cameraActiveRef.current = true;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.muted = true;
-          try {
-            await videoRef.current.play();
-          } catch {
-            videoRef.current.play().catch(() => {});
-          }
-        }
-
-        setCameraActive(true);
-        setFaceCount(0);
-        setHedgedText('Camera active — tracking faces and expressions...');
-
-        try {
-          await fetch('/api/vision/toggle', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: true, emotion_enabled: emotionActive }),
-          });
-        } catch {}
-      } catch (err: any) {
-        console.error('Could not access camera:', err);
-        let msg = 'Access denied or device busy';
-        if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
-          msg = 'Camera permission blocked. Check browser address bar or Windows Settings > Privacy > Camera.';
-        } else if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
-          msg = 'Camera not found. Check Device Manager or ensure camera privacy shutter is open.';
-        } else if (err?.name === 'NotReadableError' || err?.name === 'TrackStartError') {
-          msg = 'Camera is in use by another app (Teams, Zoom, Camera app). Close other apps and retry.';
-        } else if (err?.message) {
-          msg = err.message;
-        }
-        setHedgedText(`Camera notice: ${msg}`);
-        cameraActiveRef.current = false;
-        setCameraActive(false);
+    } catch (err: any) {
+      console.error('Could not access camera:', err);
+      let msg = 'Access denied or device busy';
+      if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
+        msg = 'Camera permission blocked. Check browser address bar or Windows Settings > Privacy > Camera.';
+      } else if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
+        msg = 'Camera not found. Check Device Manager or ensure camera privacy shutter is open.';
+      } else if (err?.name === 'NotReadableError' || err?.name === 'TrackStartError') {
+        msg = 'Camera is in use by another app (Teams, Zoom, Camera app). Close other apps and retry.';
+      } else if (err?.message) {
+        msg = err.message;
       }
+      setHedgedText(`Camera notice: ${msg}`);
+      cameraActiveRef.current = false;
+      setCameraActive(false);
+    }
+  };
+
+  // Toggle Camera
+  const toggleCamera = async () => {
+    if (cameraActive) {
+      await stopCamera();
+    } else {
+      await startCamera();
     }
   };
 
@@ -1164,11 +1528,13 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
 
               const coverBox = computeVideoCoverRect(nx, ny, nw, nh, vWidth, vHeight, cWidth, cHeight, true);
 
-              const identityName = f.identity && f.identity !== 'Unknown' ? f.identity : '';
+              const isKnown = f.identity && f.identity !== 'Unknown';
+              const identityName = isKnown ? f.identity : 'Unknown';
+              const displayLabel = isKnown ? f.identity : (idx === 0 ? 'Unknown' : `Unknown (#${idx + 1})`);
               return {
                 trackId: f.track_id || (idx + 1),
                 identity: identityName,
-                label: identityName || (registeredFaces[0] || `TARGET #${f.track_id || (idx + 1)}`),
+                label: displayLabel,
                 expression: f.expression || data.expression || 'neutral',
                 confidence: f.expression_confidence || data.expression_confidence || 0.85,
                 box: coverBox,
@@ -1226,18 +1592,34 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
     refreshCameraDevices();
     syncKnownFacesFromBackend();
 
+    // Always-on camera: Automatically start camera on mount
+    const startTimer = setTimeout(() => {
+      if (!cameraActiveRef.current) {
+        startCamera();
+      }
+    }, 150);
+
     const handleDeviceChange = () => {
       refreshCameraDevices();
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && !cameraActiveRef.current) {
+        startCamera();
+      }
     };
 
     if (navigator.mediaDevices?.addEventListener) {
       navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
     }
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
+      clearTimeout(startTimer);
       if (navigator.mediaDevices?.removeEventListener) {
         navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
       }
+      document.removeEventListener('visibilitychange', handleVisibility);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
@@ -1261,16 +1643,23 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       try {
         const ctx = canvasRef.current.getContext('2d');
         if (ctx) {
-          const imgData = ctx.getImageData(0, 0, canvasRef.current.width, canvasRef.current.height);
-          const sig = extractClientFaceSignature(
-            imgData.data,
-            canvasRef.current.width,
-            canvasRef.current.height,
-            0,
-            0,
-            canvasRef.current.width,
-            canvasRef.current.height
-          );
+          const cw = canvasRef.current.width;
+          const ch = canvasRef.current.height;
+          let fx = 0, fy = 0, fw = cw, fh = ch;
+          if (lastDetectedNormBoxRef.current) {
+            const nb = lastDetectedNormBoxRef.current;
+            fx = Math.max(0, Math.floor(nb.x * cw));
+            fy = Math.max(0, Math.floor(nb.y * ch));
+            fw = Math.min(cw - fx, Math.floor(nb.w * cw));
+            fh = Math.min(ch - fy, Math.floor(nb.h * ch));
+          } else {
+            fx = Math.floor(cw * 0.25);
+            fy = Math.floor(ch * 0.15);
+            fw = Math.floor(cw * 0.50);
+            fh = Math.floor(ch * 0.70);
+          }
+          const imgData = ctx.getImageData(0, 0, cw, ch);
+          const sig = extractClientFaceSignature(imgData.data, cw, ch, fx, fy, fw, fh);
           if (sig) {
             const newProfiles = [{ name: trimmedName, embedding: sig }, ...faceProfiles.filter(p => p.name !== trimmedName)];
             setFaceProfiles(newProfiles);
@@ -1558,7 +1947,17 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
 
         {/* Real-Time Multi-Face Bounding Box & Emotion Tag Overlay */}
         {cameraActive && faces.map((f, idx) => {
-          const displayName = f.identity || f.label || (idx === 0 ? (registeredFaces[0] || 'Kavihai Arasu (Owner)') : `Face #${idx + 1}`);
+          const rawName = f.identity || f.label || '';
+          const isUnknown = !rawName || rawName.toLowerCase().includes('unknown');
+          const displayName = isUnknown ? (faces.length > 1 && idx > 0 ? `UNKNOWN #${idx + 1}` : 'UNKNOWN') : rawName;
+          const boxBorderColor = isUnknown ? '#F59E0B' : '#00E5FF';
+          const boxGlow = isUnknown
+            ? '0 0 16px rgba(245, 158, 11, 0.45), inset 0 0 8px rgba(245, 158, 11, 0.15)'
+            : '0 0 16px rgba(0, 229, 255, 0.45), inset 0 0 8px rgba(0, 229, 255, 0.15)';
+          const badgeGradient = isUnknown
+            ? 'linear-gradient(135deg, #F59E0B 0%, #D97706 100%)'
+            : 'linear-gradient(135deg, #00E5FF 0%, #0077FF 100%)';
+
           return (
             <div
               key={f.trackId}
@@ -1568,10 +1967,10 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
                 top: `${f.box.y}%`,
                 width: `${f.box.width}%`,
                 height: `${f.box.height}%`,
-                border: '2px solid #00E5FF',
+                border: `2px solid ${boxBorderColor}`,
                 borderRadius: 6,
                 pointerEvents: 'none',
-                boxShadow: '0 0 16px rgba(0, 229, 255, 0.45), inset 0 0 8px rgba(0, 229, 255, 0.15)',
+                boxShadow: boxGlow,
                 transition: 'all 0.08s ease-out',
                 zIndex: 6,
               }}
@@ -1580,7 +1979,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
                 position: 'absolute',
                 top: -24,
                 left: -2,
-                background: 'linear-gradient(135deg, #00E5FF 0%, #0077FF 100%)',
+                background: badgeGradient,
                 borderRadius: '4px 4px 0 0',
                 padding: '2px 8px',
                 fontSize: '0.70rem',
@@ -1659,10 +2058,16 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
             <span style={{ fontSize: '1.4rem' }}>{currentMeta.emoji}</span>
             <div>
               <div style={{ fontSize: '0.85rem', fontWeight: 700, color: currentMeta.color, transition: 'color 0.2s ease' }}>
-                {faceCount > 0 ? `${faces[0]?.identity || faces[0]?.label || registeredFaces[0] || 'Kavihai Arasu (Owner)'} — ${currentMeta.label}` : 'No Face In View'}
+                {faceCount > 0 
+                  ? `${faces[0]?.identity && !faces[0]?.identity.toLowerCase().includes('unknown') ? faces[0].identity : 'Unknown'} — ${currentMeta.label}` 
+                  : 'No Face In View'}
               </div>
               <div style={{ fontSize: '0.66rem', color: 'var(--text-muted)' }}>
-                {faceCount > 0 ? '✓ Verified Facial Biometric Profile' : 'Awaiting subject presence'}
+                {faceCount > 0 
+                  ? (faces[0]?.identity && !faces[0]?.identity.toLowerCase().includes('unknown') 
+                      ? '✓ Verified Facial Biometric Profile' 
+                      : '⚠️ Unregistered / Unknown Face Biometrics') 
+                  : 'Awaiting subject presence'}
               </div>
             </div>
           </div>

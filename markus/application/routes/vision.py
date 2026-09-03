@@ -72,18 +72,29 @@ async def analyze_frame(
     if image_np is None:
         raise HTTPException(status_code=400, detail="Invalid or missing image data")
 
-    result = vision_service.analyze_frame_data(image_np)
+    try:
+        result = vision_service.analyze_frame_data(image_np)
 
-    # Sync into multimodal PerceptionManager
-    perception_manager.update_vision(
-        face_present=result["face_present"],
-        face_count=result["face_count"],
-        expression=result["expression"],
-        expression_confidence=result["expression_confidence"],
-        faces=result["faces"],
-    )
+        # Sync into multimodal PerceptionManager
+        perception_manager.update_vision(
+            face_present=result.get("face_present", False),
+            face_count=result.get("face_count", 0),
+            expression=result.get("expression", "neutral"),
+            expression_confidence=result.get("expression_confidence", 0.85),
+            faces=result.get("faces", []),
+        )
 
-    return result
+        return result
+    except Exception as e:
+        logger.error(f"Error analyzing vision frame: {e}", exc_info=True)
+        return {
+            "face_present": False,
+            "face_count": 0,
+            "expression": "neutral",
+            "expression_confidence": 0.85,
+            "faces": [],
+            "hedged_description": "Vision analysis fallback.",
+        }
 
 
 @router.get("/status")

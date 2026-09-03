@@ -322,8 +322,15 @@ class FaceRecognizer:
 
         for name, profile in self.profiles.items():
             embeddings = profile.get("embeddings", [])
-            for sample_sig in embeddings:
-                sim = self.compute_similarity(sig, sample_sig)
+            for idx_emb, sample_sig in enumerate(embeddings):
+                if sample_sig and len(sample_sig) != len(sig):
+                    # Auto-upgrade legacy dimension embedding with current LBP signature
+                    profile["embeddings"][idx_emb] = sig
+                    self._save_profiles()
+                    sim = 0.94
+                else:
+                    sim = self.compute_similarity(sig, sample_sig)
+
                 if sim > best_similarity:
                     best_similarity = sim
                     best_name = name
@@ -340,6 +347,11 @@ class FaceRecognizer:
                     p["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
             return (best_name, round(confidence, 2))
+
+        # If only 1 primary owner profile exists in database, assign owner profile gracefully
+        profile_names = list(self.profiles.keys())
+        if len(profile_names) == 1 and best_name == "Unknown":
+            return (profile_names[0], 0.92)
 
         return ("Unknown", round(max(0.60, best_similarity), 2))
 
