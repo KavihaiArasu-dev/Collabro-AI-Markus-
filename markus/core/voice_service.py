@@ -134,7 +134,9 @@ class VoiceService:
 
             if _HAS_EDGE_TTS:
                 # Use edge-tts for natural high-quality voice
-                communicate = edge_tts.Communicate(clean_text, "en-US-ChristopherNeural")
+                from config.settings import settings
+                voice_name = getattr(getattr(settings, "voice", None), "tts_voice", "ta-IN-ValluvarNeural")
+                communicate = edge_tts.Communicate(clean_text, voice_name)
 
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
                     temp_path = f.name

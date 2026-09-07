@@ -41,7 +41,21 @@ export default function ChatPage() {
   useEffect(() => {
     const pickVoice = () => {
       const voices = window.speechSynthesis?.getVoices() || [];
-      // Prefer high-quality voices in order
+      const currentLang = localStorage.getItem('markus_language') || 'ta-IN';
+
+      if (currentLang === 'ta-IN') {
+        const tamil = voices.find(v => 
+          v.lang.toLowerCase().replace('_', '-').startsWith('ta') ||
+          v.name.toLowerCase().includes('tamil') ||
+          v.name.toLowerCase().includes('valluvar') ||
+          v.name.toLowerCase().includes('pallavi')
+        );
+        if (tamil) { selectedVoiceRef.current = tamil; return; }
+        const inVoice = voices.find(v => v.lang.toLowerCase().includes('en-in') || v.name.toLowerCase().includes('india'));
+        if (inVoice) { selectedVoiceRef.current = inVoice; return; }
+      }
+
+      // Prefer high-quality English voices
       const preferred = [
         'Google US English',
         'Microsoft Zira',
@@ -54,9 +68,10 @@ export default function ChatPage() {
         const v = voices.find(voice => voice.name.includes(name));
         if (v) { selectedVoiceRef.current = v; return; }
       }
-      // Fallback: first English voice
       const en = voices.find(v => v.lang.startsWith('en'));
-      if (en) selectedVoiceRef.current = en;
+      if (en) { selectedVoiceRef.current = en; return; }
+
+      if (voices.length > 0) selectedVoiceRef.current = voices[0];
     };
     pickVoice();
     window.speechSynthesis?.addEventListener('voiceschanged', pickVoice);
@@ -89,7 +104,7 @@ export default function ChatPage() {
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
-    recognition.lang = 'en-US';
+    recognition.lang = localStorage.getItem('markus_language') || 'ta-IN';
 
     recognition.onstart = () => {
       isStartedRef.current = true;
@@ -264,7 +279,9 @@ export default function ChatPage() {
   const speakWithVoice = useCallback((text: string, onEnd?: () => void) => {
     if (!window.speechSynthesis || !text) return;
     window.speechSynthesis.cancel();
+    const currentLang = localStorage.getItem('markus_language') || 'ta-IN';
     const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = currentLang;
     if (selectedVoiceRef.current) utterance.voice = selectedVoiceRef.current;
     utterance.rate = 1.05;
     utterance.onend = () => onEnd?.();
@@ -670,8 +687,10 @@ function MessageItem({ message }: { message: Message }) {
   const speakText = () => {
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
+      const currentLang = localStorage.getItem('markus_language') || 'ta-IN';
       const clean = message.content.replace(/```[\s\S]*?```/g, '').replace(/[*#_~`]/g, '');
       const utterance = new SpeechSynthesisUtterance(clean.slice(0, 300));
+      utterance.lang = currentLang;
       window.speechSynthesis.speak(utterance);
     }
   };

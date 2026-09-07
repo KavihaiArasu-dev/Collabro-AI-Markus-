@@ -41,6 +41,12 @@ class VisionService:
             }
 
         boxes = self.face_tracker.detect_faces(image_np)
+        if boxes:
+            # Sort by bounding box area descending so primary foreground face is selected
+            boxes = sorted(boxes, key=lambda b: b.get("bbox", (0, 0, 0, 0))[2] * b.get("bbox", (0, 0, 0, 0))[3], reverse=True)
+            # Track single primary face (prevents multiple face tracking and background ghost detections)
+            boxes = [boxes[0]]
+
         tracked_faces = self.face_tracker.track_and_normalize(image_np, boxes)
 
         faces_output: List[Dict[str, Any]] = []

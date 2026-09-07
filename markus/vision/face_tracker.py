@@ -33,9 +33,9 @@ class FaceTracker:
                     model=yunet_path,
                     config="",
                     input_size=(320, 320),
-                    score_threshold=0.35,
-                    nms_threshold=0.30,
-                    top_k=10,
+                    score_threshold=0.55,
+                    nms_threshold=0.35,
+                    top_k=5,
                 )
                 logger.info("YuNet deep learning face detector loaded successfully")
             except Exception as e:
@@ -110,6 +110,14 @@ class FaceTracker:
                         fw = min(w - fx, max(16, int(f[2])))
                         fh = min(h - fy, max(16, int(f[3])))
 
+                        # Filter out tiny spurious background boxes and distorted aspect ratios
+                        min_dim = max(32, int(min(w, h) * 0.08))
+                        if fw < min_dim or fh < min_dim:
+                            continue
+                        aspect = float(fh) / max(1, fw)
+                        if aspect < 0.70 or aspect > 2.2:
+                            continue
+
                         # 5 facial landmarks: right_eye, left_eye, nose_tip, right_mouth, left_mouth
                         landmarks = []
                         if len(f) >= 14:
@@ -125,6 +133,8 @@ class FaceTracker:
                         })
 
                     if detections:
+                        # Sort by area (prominence) descending so primary user face is always first
+                        detections.sort(key=lambda d: d["bbox"][2] * d["bbox"][3], reverse=True)
                         return detections
             except Exception as e:
                 logger.warning(f"Error in YuNet detection: {e}")

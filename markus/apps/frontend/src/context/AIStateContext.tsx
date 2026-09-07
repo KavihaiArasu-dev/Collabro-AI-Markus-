@@ -18,9 +18,13 @@ const AIStateContext = createContext<AIStateContextType>({
 });
 
 const getWsUrl = () => {
-  if (typeof window === 'undefined') return 'ws://localhost:8000/ws';
+  if (typeof window === 'undefined') return 'ws://127.0.0.1:8010/ws';
+  // If running in Vite dev mode (port 5173), connect directly to backend (port 8010)
+  // to avoid Vite HMR WebSocket collision on port 5173
+  if (window.location.port === '5173') {
+    return 'ws://127.0.0.1:8010/ws';
+  }
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // Use Vite proxy endpoint or direct backend connection
   return `${proto}//${window.location.host}/ws`;
 };
 const WS_URL = getWsUrl();

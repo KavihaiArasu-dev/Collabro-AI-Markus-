@@ -138,13 +138,15 @@ class AutomationAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
+        from core.prompts import CHROME_AUTOMATION_SYSTEM_PROMPT
         return (
             "You are Markus's Automation Agent — a workflow automation specialist. "
             "You create and manage scheduled tasks, CI/CD pipelines, "
             "and repetitive developer workflows. You interpret commands precisely "
             "and translate them into deterministic tool calls. "
             "Remember: your output never reaches the OS directly — every action "
-            "goes through the Permission Manager and Tool Router."
+            "goes through the Permission Manager and Tool Router.\n\n"
+            f"{CHROME_AUTOMATION_SYSTEM_PROMPT}"
         )
 
 

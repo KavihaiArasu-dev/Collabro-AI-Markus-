@@ -15,7 +15,11 @@ from typing import Any, AsyncGenerator, Optional
 
 from openai import AsyncOpenAI, OpenAI, APIConnectionError, APITimeoutError, APIStatusError
 
+from dotenv import load_dotenv
+
 from config.settings import settings
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -91,22 +95,179 @@ class OmniRouteClient:
             )
             return client, default_model
 
+    def _format_gemini_payload(
+        self,
+        messages: list[dict],
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> dict:
+        contents = []
+        sys_parts = []
+        if system_prompt:
+            sys_parts.append(system_prompt)
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                sys_parts.append(content)
+            elif role == "assistant":
+                contents.append({"role": "model", "parts": [{"text": content}]})
+            else:
+                contents.append({"role": "user", "parts": [{"text": content}]})
+
+        if not contents:
+            contents = [{"role": "user", "parts": [{"text": "Hello"}]}]
+
+        payload: dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+            },
+        }
+        if sys_parts:
+            payload["systemInstruction"] = {
+                "parts": [{"text": "\n\n".join(sys_parts)}]
+            }
+        return payload
+
+    async def _generate_gemini(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not gemini_key:
+            raise ValueError("GEMINI_API_KEY is not configured")
+
+        models = [
+            os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+            "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-flash-latest",
+        ]
+        payload = self._format_gemini_payload(messages, system_prompt, temperature, max_tokens)
+
+        last_error = None
+        import httpx
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for model in models:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+                try:
+                    res = await client.post(url, json=payload)
+                    if res.status_code == 200:
+                        data = res.json()
+                        candidates = data.get("candidates", [])
+                        if candidates and "content" in candidates[0]:
+                            parts = candidates[0]["content"].get("parts", [])
+                            text = "".join(p.get("text", "") for p in parts)
+                            if text:
+                                self._active_provider = "gemini"
+                                self._active_model = model
+                                self._connected = True
+                                return text
+                    else:
+                        last_error = f"Gemini {model} returned HTTP {res.status_code}: {res.text[:200]}"
+                        logger.warning(last_error)
+                except Exception as err:
+                    last_error = str(err)
+                    logger.warning(f"Gemini {model} request failed: {err}")
+
+        raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
+
+    async def _generate_gemini_stream(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        system_prompt: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not gemini_key:
+            raise ValueError("GEMINI_API_KEY is not configured")
+
+        models = [
+            os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+            "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-flash-latest",
+        ]
+        payload = self._format_gemini_payload(messages, system_prompt, temperature, max_tokens)
+
+        import httpx
+        import json
+        yielded_any = False
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                for model in models:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={gemini_key}"
+                    try:
+                        async with client.stream("POST", url, json=payload) as response:
+                            if response.status_code == 200:
+                                async for line in response.aiter_lines():
+                                    if line.startswith("data: "):
+                                        try:
+                                            data = json.loads(line[6:])
+                                            candidates = data.get("candidates", [])
+                                            if candidates and "content" in candidates[0]:
+                                                parts = candidates[0]["content"].get("parts", [])
+                                                for part in parts:
+                                                    chunk_text = part.get("text", "")
+                                                    if chunk_text:
+                                                        yielded_any = True
+                                                        yield chunk_text
+                                        except Exception:
+                                            pass
+                                if yielded_any:
+                                    self._active_provider = "gemini"
+                                    self._active_model = model
+                                    self._connected = True
+                                    return
+                    except Exception as err:
+                        logger.debug(f"Gemini SSE stream attempt for {model} failed: {err}")
+                        continue
+        except Exception as e:
+            logger.debug(f"Gemini stream client exception: {e}")
+
+        # If SSE stream didn't yield or timed out, fetch via generateContent and stream word-by-word
+        if not yielded_any:
+            text = await self._generate_gemini(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+            )
+            words = text.split(" ")
+            for i, w in enumerate(words):
+                yield w + (" " if i < len(words) - 1 else "")
+                await asyncio.sleep(0.015)
+
     async def check_connection(self) -> bool:
         """Test if OmniRoute or any configured AI provider is reachable."""
         try:
             import httpx
             async with httpx.AsyncClient(timeout=2.0) as client:
                 res = await client.get(f"{self._base_url}/models")
-                self._connected = (res.status_code == 200)
-                if self._connected:
+                if res.status_code == 200:
+                    self._connected = True
+                    self._active_provider = "omniroute"
                     return True
         except Exception:
-            self._connected = False
+            pass
 
         # Check if direct provider keys are set
         if any(os.getenv(k) for k in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY"]):
+            self._connected = True
+            if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+                self._active_provider = "gemini"
+                self._active_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
             return True
 
+        self._connected = False
         return False
 
     @property
@@ -121,10 +282,24 @@ class OmniRouteClient:
         max_tokens: int = 4096,
         system_prompt: Optional[str] = None,
     ) -> str:
-        """Send a non-streaming completion request."""
+        """Send a non-streaming completion request with Gemini direct support."""
         if system_prompt:
             messages = [{"role": "system", "content": system_prompt}] + messages
 
+        # 1. Direct Gemini API call if Gemini key is present and OmniRoute is offline/custom
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if gemini_key:
+            try:
+                return await self._generate_gemini(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    system_prompt=None,  # system prompt is already incorporated in messages
+                )
+            except Exception as e:
+                logger.warning(f"Gemini direct call failed ({e}), attempting standard gateway client...")
+
+        # 2. Try standard OpenAI-compatible client (OmniRoute, Groq, OpenAI, Ollama)
         try:
             client, default_model = self._get_async_client()
             chosen_model = default_model if default_model != "auto" else route
@@ -150,10 +325,29 @@ class OmniRouteClient:
         max_tokens: int = 4096,
         system_prompt: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        """Send a streaming completion request."""
+        """Send a streaming completion request with Gemini direct support."""
         if system_prompt:
             messages = [{"role": "system", "content": system_prompt}] + messages
 
+        # 1. Direct Gemini API stream if Gemini key is present
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if gemini_key:
+            try:
+                has_tokens = False
+                async for token in self._generate_gemini_stream(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    system_prompt=None,
+                ):
+                    has_tokens = True
+                    yield token
+                if has_tokens:
+                    return
+            except Exception as e:
+                logger.warning(f"Gemini direct stream failed ({e}), attempting gateway client...")
+
+        # 2. Try standard OpenAI-compatible stream
         try:
             client, default_model = self._get_async_client()
             chosen_model = default_model if default_model != "auto" else route
@@ -169,11 +363,10 @@ class OmniRouteClient:
             async for chunk in stream:
                 if hasattr(chunk, "choices") and chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
-
+            return
         except Exception as e:
             logger.warning(f"AI stream unavailable ({e}), generating via Markus code engine")
             fallback_text = self._fallback_response(messages, str(e))
-            # Stream response in natural word chunks
             words = fallback_text.split(" ")
             for i, word in enumerate(words):
                 yield word + (" " if i < len(words) - 1 else "")
@@ -191,6 +384,53 @@ class OmniRouteClient:
                 break
 
         q = last_user_msg.lower().strip()
+
+        # ── 0. IDENTITY, CAPABILITIES & HELP ──
+        if any(w in q for w in [
+            "how can you help", "what can you do", "who are you", "what are your capabilities",
+            "help me", "help", "who is markus", "introduce yourself", "features",
+            "commands", "what do you do", "வணக்கம்", "நீ யார்", "உன்னால் என்ன செய்ய முடியும்", "உதவி"
+        ]):
+            import re
+            is_tamil = bool(re.search(r"[\u0B80-\u0BFF]", q)) or any(w in q for w in ["tamil", "தமிழ்"])
+            if is_tamil:
+                return (
+                    "### வணக்கம்! நான் மார்கஸ் (Markus AI) — உங்கள் தனிப்பட்ட AI உதவியாளர் 🚀\n\n"
+                    "நான் உங்கள் கணினியை கட்டுப்படுத்தவும், பணிகளை விரைவாக முடிக்கவும் பின்வரும் வழிகளில் உதவுகிறேன்:\n\n"
+                    "1. **🖥️ கணினி கட்டுப்பாடு & பயன்பாடுகள் (Computer Automation)**:\n"
+                    "   • *'chrome-ஐ திற'*, *'நோட்பேட் திற'*, *'விஸ்கோடு திற'*, *'டாஸ்க் மேனேஜர் திற'*\n"
+                    "   • *'ஸ்கிரீன்ஷாட் எடு'*, *'வால்யூம் குறை/கூட்டு/70'*, *'பூட்டு (Lock PC)'*\n\n"
+                    "2. **🌐 இணையம் & மீடியா (Web & Media)**:\n"
+                    "   • *'யூடியூப் திற'*, *'youtube-ல இளையராஜா பாட்டு போடு'*\n"
+                    "   • *'கூகிளில் தேடு'*, *'github திற'*\n\n"
+                    "3. **👁️ கணினி பார்வை & பயோமெட்ரிக்ஸ் (Perception & Vision)**:\n"
+                    "   • முக அங்கீகாரம் (Face Detection & Recognition), முகபாவனை பகுப்பாய்வு (Emotion Tracking)\n\n"
+                    "4. **💻 நிரலாக்கம் & குறியீட்டு உதவி (Code Generation)**:\n"
+                    "   • Python, C, C++, Java, JavaScript, FastAPI போன்ற எந்த மொழியிலும் முழுமையான நிரல்களை உருவாக்குதல்.\n\n"
+                    "5. **🎙️ தமிழ் & ஆங்கில குரல் தொடர்பு (Bilingual Voice Assistant)**:\n"
+                    "   • தமிழில் பேசினால் தமிழிலேயே பதிலளிப்பேன், ஆங்கிலத்திலும் உரையாடலாம்.\n\n"
+                    "உங்களுக்கு இப்போது என்ன செய்ய வேண்டும் என்று சொல்லுங்கள்!"
+                )
+            return (
+                "### Hello! I am Markus AI — Your Intelligent Desktop & Voice Companion 🚀\n\n"
+                "I can assist you across desktop automation, voice interaction, real-time perception, and engineering tasks:\n\n"
+                "1. **🖥️ Desktop Automation & App Control**:\n"
+                "   • Open apps or websites: *\"Open Chrome\"*, *\"Open VS Code\"*, *\"Open YouTube\"*, *\"Open GitHub\"*\n"
+                "   • System controls: *\"Take a screenshot\"*, *\"Set volume to 50\"*, *\"Mute\"*, *\"Lock screen\"*\n"
+                "   • Closed-loop verification ensures every action is confirmed against live system state.\n\n"
+                "2. **🎙️ Bilingual Voice Assistant (Tamil & English)**:\n"
+                "   • Talk to me naturally in **Tamil (தமிழ்)** or **English**.\n"
+                "   • Supports commands like *\"chrome-ஐ திற\"*, *\"வால்யூம் குறை\"*, or *\"youtube-ல இளையராஜா பாட்டு போடு\"*.\n\n"
+                "3. **👁️ Real-time Vision & Perception**:\n"
+                "   • Multi-face detection, tracking, owner identification, and emotion estimation via webcam.\n\n"
+                "4. **💻 Software Development & Code Synthesis**:\n"
+                "   • Generate runnable, production-quality code in Python, C, C++, Java, TypeScript, and FastAPI.\n"
+                "   • Architecture design, debugging, and algorithms.\n\n"
+                "5. **📊 System Diagnostics & Search**:\n"
+                "   • Monitor CPU, RAM, and battery levels (*\"What's my battery level?\"*, *\"System status\"*).\n"
+                "   • Instant web and news search (*\"Search for quantum computing\"*).\n\n"
+                "What would you like me to do for you right now?"
+            )
 
         # ── 1. CALCULATOR (CLI, Scientific & GUI) ──
         if "calculator" in q or "calc" in q:
@@ -965,17 +1205,42 @@ class OmniRouteClient:
 
     async def list_models(self) -> list[dict]:
         """Discover available models/routes from OmniRoute or configured providers."""
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if gemini_key:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    res = await client.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}")
+                    if res.status_code == 200:
+                        data = res.json()
+                        raw_models = data.get("models", [])
+                        gem_models = []
+                        for m in raw_models:
+                            if "generateContent" in m.get("supportedGenerationMethods", []):
+                                mid = m.get("name", "").replace("models/", "")
+                                gem_models.append({
+                                    "id": mid,
+                                    "created": 1700000000,
+                                    "owned_by": "google",
+                                })
+                        if gem_models:
+                            self._connected = True
+                            return gem_models
+            except Exception as e:
+                logger.debug(f"Could not list Gemini models via REST: {e}")
+
         try:
             client, _ = self._get_async_client()
             models = await client.models.list()
             self._connected = True
             return [{"id": m.id, "created": m.created, "owned_by": m.owned_by} for m in models.data]
         except Exception as e:
-            self._connected = False
             logger.debug(f"Could not list models: {e}")
             return [
+                {"id": "gemini-3.6-flash", "created": 1700000000, "owned_by": "google"},
+                {"id": "gemini-flash-latest", "created": 1700000000, "owned_by": "google"},
+                {"id": "gemini-3.5-flash", "created": 1700000000, "owned_by": "google"},
                 {"id": "auto", "created": 1700000000, "owned_by": "markus"},
-                {"id": "gemini-1.5-flash", "created": 1700000000, "owned_by": "google"},
                 {"id": "llama-3.3-70b-versatile", "created": 1700000000, "owned_by": "groq"},
                 {"id": "gpt-4o-mini", "created": 1700000000, "owned_by": "openai"},
             ]

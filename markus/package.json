@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "npm --prefix apps/frontend run dev",
+    "backend": "python main.py",
     "build": "npm --prefix apps/frontend run build",
     "preview": "npm --prefix apps/frontend run preview"
   }

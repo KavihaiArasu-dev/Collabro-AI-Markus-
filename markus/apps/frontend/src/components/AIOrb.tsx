@@ -90,14 +90,26 @@ export default function AIOrb({ state = 'idle', size = 200, onClick }: OrbProps)
     const ctx = canvas.getContext('2d', { alpha: true });
     if (!ctx) return;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     canvas.width = size * dpr;
     canvas.height = size * dpr;
     ctx.scale(dpr, dpr);
 
     let time = 0;
+    let lastTime = performance.now();
 
-    const animate = () => {
+    const animate = (timestamp: number) => {
+      // Pause drawing when tab is in background to save GPU/CPU cycles
+      if (document.hidden) {
+        lastTime = timestamp;
+        animationRef.current = requestAnimationFrame(animate);
+        return;
+      }
+
+      // Delta time capped at 33ms (~30fps floor) to prevent frame jump spikes
+      const elapsed = Math.min((timestamp - lastTime) / 1000, 0.033);
+      lastTime = timestamp;
+
       const curState = stateRef.current;
       const curSize = sizeRef.current;
       const center = curSize / 2;
@@ -105,8 +117,8 @@ export default function AIOrb({ state = 'idle', size = 200, onClick }: OrbProps)
       const cfg = STATE_CONFIG[curState] || STATE_CONFIG.idle;
 
       // When waiting for confirmation, motion pauses visibly (§7)
-      const timeIncrement = curState === 'waiting_for_confirmation' ? 0.002 : 0.016;
-      time += timeIncrement;
+      const speedFactor = curState === 'waiting_for_confirmation' ? 0.12 : 1.0;
+      time += elapsed * speedFactor;
 
       ctx.clearRect(0, 0, curSize, curSize);
 
@@ -159,7 +171,7 @@ export default function AIOrb({ state = 'idle', size = 200, onClick }: OrbProps)
       animationRef.current = requestAnimationFrame(animate);
     };
 
-    animate();
+    animationRef.current = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(animationRef.current);
   }, [size]);
 

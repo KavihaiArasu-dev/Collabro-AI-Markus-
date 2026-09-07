@@ -10,8 +10,16 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+
+# Ensure .env is loaded into os.environ for all modules
+env_path = Path(__file__).resolve().parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    load_dotenv()
 
 
 class OmniRouteSettings(BaseSettings):
@@ -51,11 +59,18 @@ class RAGSettings(BaseSettings):
     top_k: int = 5
 
 
+class VoiceSettings(BaseSettings):
+    """Voice & Speech settings."""
+    language: str = Field(default="ta-IN", alias="MARKUS_LANGUAGE")
+    tts_voice: str = Field(default="ta-IN-ValluvarNeural", alias="MARKUS_TTS_VOICE")
+    whisper_language: str = Field(default="ta", alias="MARKUS_WHISPER_LANGUAGE")
+
+
 class Settings(BaseSettings):
     """Root settings — aggregates all sub-settings."""
     # Application
     host: str = Field(default="0.0.0.0", alias="MARKUS_HOST")
-    port: int = Field(default=8000, alias="MARKUS_PORT")
+    port: int = Field(default=8010, alias="MARKUS_PORT")
     env: str = Field(default="development", alias="MARKUS_ENV")
     debug: bool = Field(default=True, alias="MARKUS_DEBUG")
     secret_key: str = Field(default="change-this-to-a-random-secret-key", alias="MARKUS_SECRET_KEY")
@@ -69,6 +84,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = DatabaseSettings()
     memory: MemorySettings = MemorySettings()
     rag: RAGSettings = RAGSettings()
+    voice: VoiceSettings = VoiceSettings()
 
     # Paths
     base_dir: Path = Path(__file__).resolve().parent.parent

@@ -67,6 +67,8 @@ class IntentType(str, Enum):
     MEMORY = "memory"
     RAG = "rag"
     SETTINGS = "settings"
+    VOICE_COMMAND = "voice_command"
+    YOUTUBE = "youtube"
 
 
 # ── Tool Risk Levels (§11a) ──

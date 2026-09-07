@@ -37,6 +37,14 @@ INTENT_PATTERNS: dict[IntentType, list[str]] = {
         r"\b(run|execute)\b.*\b(command|script|terminal|shell)\b",
         r"\b(file|folder|directory)\b.*\b(create|delete|move|copy|rename)\b",
         r"\b(system|cpu|ram|memory|disk|gpu|battery|network)\b.*\b(status|info|check|monitor)\b",
+        r"\b(volume|mute|unmute|louder|quieter|softer)\b",
+        r"\b(brightness|brighter|dimmer|darker)\b",
+        r"\b(screenshot|screen capture|screen grab|capture screen)\b",
+        r"\b(lock screen|shutdown|shut down|restart|reboot|power off)\b",
+        r"\b(battery level|battery status|how much battery)\b",
+        r"\b(network status|internet status|am i connected)\b",
+        r"\b(uptime|system uptime)\b",
+        r"\b(wifi|wi-fi|wireless)\b",
     ],
     IntentType.RESEARCH: [
         r"\b(research|find|search|look up|what is|explain|how does|documentation)\b",
@@ -74,16 +82,32 @@ INTENT_PATTERNS: dict[IntentType, list[str]] = {
     IntentType.SEARCH: [
         r"\b(search for|google|look up on the web|find online)\b",
         r"\b(web search|browse for|query)\b",
+        r"\b(search the web|search online|search internet)\b",
+        r"\b(news about|latest news|what's the news)\b",
     ],
     IntentType.FILE_OPERATION: [
         r"\b(file|folder|directory)\b.*\b(create|delete|move|copy|rename|search|find|read|write)\b",
         r"\b(read file|write to file|save file|list directory|find file)\b",
     ],
     IntentType.APP_CONTROL: [
-        r"\b(open|launch|start|close|terminate|kill|restart)\b.*\b(app|application|program|software|chrome|vscode|spotify)\b",
+        r"\b(open|launch|start|close|terminate|kill|restart)\b.*\b(app|application|program|software)\b",
+        r"\b(open|launch|start|close|terminate|kill)\s+(chrome|firefox|edge|brave|safari|opera)\b",
+        r"\b(open|launch|start|close|terminate|kill)\s+(whatsapp|telegram|discord|slack|zoom|teams|skype|signal)\b",
+        r"\b(open|launch|start|close|terminate|kill)\s+(spotify|vlc|netflix|itunes)\b",
+        r"\b(open|launch|start|close|terminate|kill)\s+(vscode|vs code|visual studio|sublime|notepad|terminal|cmd|powershell)\b",
+        r"\b(open|launch|start|close|terminate|kill)\s+(word|excel|powerpoint|outlook)\b",
+        r"\b(open|launch|start|close|terminate|kill)\s+(explorer|finder|file explorer|task manager|calculator|paint|settings|camera|store)\b",
+        r"\b(list|show|what are)\s+(running|active)\s+(apps|applications|programs|processes)\b",
     ],
     IntentType.BROWSER_AUTOMATION: [
         r"\b(open website|open url|go to website|navigate to|search web|open in browser)\b",
+        r"\b(open|go to|visit|navigate to)\s+\S+\.(com|org|net|io|dev|ai|co)\b",
+    ],
+    IntentType.YOUTUBE: [
+        r"\b(play|play me)\b.*\b(on youtube|youtube|on yt)\b",
+        r"\b(youtube|yt)\s+(play|search|find)\b",
+        r"\b(play)\s+.+\s+(song|music|video|track)\b",
+        r"\b(search youtube|youtube search|search on youtube)\b",
     ],
     IntentType.TASK_MANAGEMENT: [
         r"\b(task|todo|to-do|project tasks|assign task|create task|track task)\b",
@@ -117,11 +141,23 @@ class IntentClassifier:
         """
         Classify user input into an intent type.
 
-        Returns the most likely intent based on keyword pattern matching.
+        Uses multilingual NLP analysis and keyword pattern matching.
         Falls back to CHAT for unrecognized inputs.
         """
         if not user_input or not user_input.strip():
             return IntentType.CHAT
+
+        # Check for non-English or multilingual input via NLP engine
+        try:
+            from core.nlp_processor import nlp_processor
+            lang = nlp_processor.detect_language(user_input)
+            if lang != "en":
+                nlp_parsed = nlp_processor.parse_intent(user_input)
+                if nlp_parsed.confidence >= 0.70 and nlp_parsed.intent != IntentType.CHAT:
+                    logger.debug(f"NLP intent classified: {nlp_parsed.intent.value} (conf={nlp_parsed.confidence:.2f}, lang={lang}) for: {user_input[:80]}")
+                    return nlp_parsed.intent
+        except Exception as e:
+            logger.debug(f"NLP classification bypass: {e}")
 
         input_lower = user_input.lower()
         scores: dict[IntentType, int] = {}
@@ -135,6 +171,14 @@ class IntentClassifier:
                 scores[intent] = score
 
         if not scores:
+            # Fallback to NLP parsing for conversational/natural phrasing
+            try:
+                from core.nlp_processor import nlp_processor
+                nlp_parsed = nlp_processor.parse_intent(user_input)
+                if nlp_parsed.confidence >= 0.70 and nlp_parsed.intent != IntentType.CHAT:
+                    return nlp_parsed.intent
+            except Exception:
+                pass
             return IntentType.CHAT
 
         # Return the highest-scoring intent
@@ -150,6 +194,17 @@ class IntentClassifier:
         if not user_input or not user_input.strip():
             return IntentType.CHAT, 1.0
 
+        # Check multilingual / Tamil input first
+        try:
+            from core.nlp_processor import nlp_processor
+            lang = nlp_processor.detect_language(user_input)
+            if lang != "en":
+                nlp_parsed = nlp_processor.parse_intent(user_input)
+                if nlp_parsed.confidence >= 0.70:
+                    return nlp_parsed.intent, nlp_parsed.confidence
+        except Exception as e:
+            logger.debug(f"NLP confidence bypass: {e}")
+
         input_lower = user_input.lower()
         scores: dict[IntentType, int] = {}
 
@@ -162,6 +217,13 @@ class IntentClassifier:
                 scores[intent] = score
 
         if not scores:
+            try:
+                from core.nlp_processor import nlp_processor
+                nlp_parsed = nlp_processor.parse_intent(user_input)
+                if nlp_parsed.confidence >= 0.70:
+                    return nlp_parsed.intent, nlp_parsed.confidence
+            except Exception:
+                pass
             return IntentType.CHAT, 0.5  # Default with moderate confidence
 
         total = sum(scores.values())
@@ -189,7 +251,8 @@ class IntentClassifier:
             "what", "how", "why", "who", "when", "where", "which", "whose", "whom",
             "can you explain", "could you explain", "explain", "tell me about",
             "tell me", "is it", "is there", "are there", "does", "do", "did",
-            "what's", "whats", "how's", "hows", "why's", "whys", "help me understand"
+            "what's", "whats", "how's", "hows", "why's", "whys", "help me understand",
+            "என்ன", "எப்படி", "யார்", "ஏன்", "எங்கே", "எப்போது", "எது"
         )
         
         # Explicit task signals: imperative verbs asking to perform an action
@@ -197,7 +260,12 @@ class IntentClassifier:
             "write", "create", "build", "generate", "code", "implement", "make",
             "fix", "debug", "refactor", "optimize", "delete", "remove", "clean",
             "run", "execute", "start", "launch", "open", "close", "kill", "restart",
-            "automate", "schedule", "deploy", "install", "test", "compile"
+            "automate", "schedule", "deploy", "install", "test", "compile",
+            "play", "search", "mute", "unmute", "screenshot", "lock", "shutdown",
+            "volume", "brightness", "focus", "switch",
+            # Tamil action imperatives:
+            "திற", "திறக்க", "மூடு", "மூடவும்", "எடு", "போடு", "இயக்கு", "குறை", "கூட்டு",
+            "அதிகரி", "செய்", "நிறுத்து", "அழி", "பூட்டு", "பதிவிறக்கு"
         )
 
         if any(input_lower.startswith(w) for w in question_starters) or "?" in user_input:
@@ -208,7 +276,8 @@ class IntentClassifier:
         if any(input_lower.startswith(w) for w in task_starters) or intent in (
             IntentType.CODE, IntentType.DEBUG, IntentType.SYSTEM_CONTROL,
             IntentType.AUTOMATION, IntentType.FILE_OPERATION, IntentType.APP_CONTROL,
-            IntentType.BROWSER_AUTOMATION, IntentType.MULTI_STEP_ACTION
+            IntentType.BROWSER_AUTOMATION, IntentType.MULTI_STEP_ACTION,
+            IntentType.YOUTUBE, IntentType.VOICE_COMMAND,
         ):
             return "task", intent
 

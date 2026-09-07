@@ -90,6 +90,8 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
   const lastEmittedEmotionRef = useRef<string>('neutral');
   const candidateEmotionRef = useRef<{ emotion: string; firstSeen: number }>({ emotion: 'neutral', firstSeen: 0 });
   const backendAvailableRef = useRef<boolean>(true);
+  const isSyncingBackendRef = useRef<boolean>(false);
+  const backendAbortControllerRef = useRef<AbortController | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const lastBackendSuccessRef = useRef<number>(0);
   const mpDetectorRef = useRef<any>(null);
@@ -384,9 +386,10 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
 
               let rawEmotion = 'neutral';
               let rawConf = face.categories?.[0]?.score || 0.94;
+              let faceImgData: ImageData | null = null;
 
               if (cropW > 8 && cropH > 8) {
-                const faceImgData = ctx.getImageData(cropX, cropY, cropW, cropH);
+                faceImgData = ctx.getImageData(cropX, cropY, cropW, cropH);
                 const { emotion, conf, scores } = estimateExpressionFromImageData(
                   faceImgData.data,
                   cropW,
@@ -401,16 +404,16 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
                 if (i === 0) primaryScores = scores;
               }
 
-              // Live biometric signature recognition
-              const liveSignature = extractClientFaceSignature(
-                ctx.getImageData(0, 0, width, height).data,
-                width,
-                height,
-                cropX,
-                cropY,
+              // Live biometric signature recognition directly from cropped face region (avoids full-frame GPU readback)
+              const liveSignature = faceImgData ? extractClientFaceSignature(
+                faceImgData.data,
+                cropW,
+                cropH,
+                0,
+                0,
                 cropW,
                 cropH
-              );
+              ) : null;
 
               // Auto-seed owner baseline on initial load if no profile exists yet
               if (faceProfiles.length === 0 && liveSignature && liveSignature.length > 0 && i === 0) {
@@ -1237,6 +1240,15 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
 
     const runClientLoop = async () => {
       if (!isSubscribed || !cameraActiveRef.current) return;
+
+      // If backend is active and providing live detections, skip heavy client-side processing
+      if (backendAvailableRef.current && (Date.now() - lastBackendSuccessRef.current < 2500)) {
+        if (isSubscribed && cameraActiveRef.current) {
+          timerRef.current = setTimeout(runClientLoop, 400);
+        }
+        return;
+      }
+
       try {
         const video = videoRef.current;
         const canvas = canvasRef.current;
@@ -1246,8 +1258,8 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
             const vw = video.videoWidth;
             const vh = video.videoHeight;
             const aspect = vh > 0 ? vw / vh : 4 / 3;
-            const targetW = 320;
-            const targetH = Math.max(160, Math.round(320 / aspect));
+            const targetW = 256;
+            const targetH = Math.max(144, Math.round(256 / aspect));
             if (canvas.width !== targetW || canvas.height !== targetH) {
               canvas.width = targetW;
               canvas.height = targetH;
@@ -1261,25 +1273,31 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       }
 
       if (isSubscribed && cameraActiveRef.current) {
-        timerRef.current = setTimeout(runClientLoop, 100);
+        timerRef.current = setTimeout(runClientLoop, 300);
       }
     };
 
     const runBackendLoop = async () => {
       if (!isSubscribed || !cameraActiveRef.current || !backendAvailableRef.current) return;
-      await syncBackendFrame();
+      const ok = await syncBackendFrame();
       if (isSubscribed && cameraActiveRef.current) {
-        backendTimerRef.current = setTimeout(runBackendLoop, 250);
+        const nextDelay = ok ? 450 : 1500;
+        backendTimerRef.current = setTimeout(runBackendLoop, nextDelay);
       }
     };
 
-    timerRef.current = setTimeout(runClientLoop, 80);
-    backendTimerRef.current = setTimeout(runBackendLoop, 200);
+    timerRef.current = setTimeout(runClientLoop, 200);
+    backendTimerRef.current = setTimeout(runBackendLoop, 350);
 
     return () => {
       isSubscribed = false;
       if (timerRef.current) clearTimeout(timerRef.current);
       if (backendTimerRef.current) clearTimeout(backendTimerRef.current);
+      if (backendAbortControllerRef.current) {
+        try { backendAbortControllerRef.current.abort(); } catch {}
+        backendAbortControllerRef.current = null;
+      }
+      isSyncingBackendRef.current = false;
     };
   }, [cameraActive]);
 
@@ -1298,6 +1316,11 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       clearTimeout(backendTimerRef.current);
       backendTimerRef.current = null;
     }
+    if (backendAbortControllerRef.current) {
+      try { backendAbortControllerRef.current.abort(); } catch {}
+      backendAbortControllerRef.current = null;
+    }
+    isSyncingBackendRef.current = false;
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
@@ -1486,18 +1509,27 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
     }
   };
 
-  const syncBackendFrame = async () => {
-    if (!videoRef.current || !canvasRef.current || !cameraActiveRef.current || !backendAvailableRef.current) return;
+  const syncBackendFrame = async (): Promise<boolean> => {
+    if (isSyncingBackendRef.current) return false;
+    if (!videoRef.current || !canvasRef.current || !cameraActiveRef.current || !backendAvailableRef.current) return false;
     const canvas = canvasRef.current;
-    if (canvas.width === 0) return;
+    if (canvas.width === 0) return false;
 
+    isSyncingBackendRef.current = true;
     try {
       const base64Image = canvas.toDataURL('image/jpeg', 0.55);
+      const controller = new AbortController();
+      backendAbortControllerRef.current = controller;
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+
       const res = await fetch('/api/vision/analyze-frame', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image_base64: base64Image }),
+        signal: controller.signal,
       }).catch(() => null);
+
+      clearTimeout(timeoutId);
 
       if (res && res.ok) {
         backendAvailableRef.current = true;
@@ -1549,9 +1581,13 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
             setFaces([]);
           }
         }
+        return true;
       }
+      return false;
     } catch {
-      // Backend sync silent fallback
+      return false;
+    } finally {
+      isSyncingBackendRef.current = false;
     }
   };
 
@@ -1960,7 +1996,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
 
           return (
             <div
-              key={f.trackId}
+              key={`face-${f.trackId ?? 'face'}-${idx}`}
               style={{
                 position: 'absolute',
                 left: `${f.box.x}%`,
@@ -2036,7 +2072,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
             zIndex: 6,
           }}>
             <UserCheck size={11} />
-            <span>FACES DETECTED: {faceCount}</span>
+            <span>{faceCount > 1 ? `FACES DETECTED: ${faceCount}` : (faceCount === 1 ? 'PRIMARY FACE DETECTED' : 'SEARCHING FACE')}</span>
           </div>
         )}
       </div>
@@ -2154,7 +2190,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
             color: '#00E5FF',
             textAlign: 'center',
           }}>
-            MULTI-FACE: {faceCount > 0 ? 'TRACKING' : 'SCANNING'}
+            FACE: {faceCount > 0 ? 'TRACKING (PRIMARY)' : 'SCANNING'}
           </div>
           <div style={{
             background: 'rgba(16, 185, 129, 0.05)',

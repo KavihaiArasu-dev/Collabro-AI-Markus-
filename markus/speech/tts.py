@@ -38,7 +38,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_VOICE = "en-US-ChristopherNeural"
+DEFAULT_VOICE = "ta-IN-ValluvarNeural"
 
 # ── Pre-compiled regex patterns (avoid recompiling on every TTS call) ──
 _RE_CODE_BLOCK = re.compile(r"```[\w]*\n[\s\S]*?```")
@@ -54,8 +54,12 @@ class TextToSpeech:
     Cleans markdown formatting and code blocks for smooth listening.
     """
 
-    def __init__(self, voice: str = DEFAULT_VOICE):
-        self.voice = voice
+    def __init__(self, voice: Optional[str] = None):
+        try:
+            from config.settings import settings
+            self.voice = voice or settings.voice.tts_voice or DEFAULT_VOICE
+        except Exception:
+            self.voice = voice or DEFAULT_VOICE
 
     def clean_text_for_speech(self, text: str) -> str:
         """Strip markdown code fences, urls, and special formatting."""

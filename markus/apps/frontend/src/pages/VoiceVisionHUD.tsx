@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Mic, MicOff, Volume2, VolumeX, Sparkles, 
   Square, Copy, Check, Maximize2, Minimize2,
-  HelpCircle, Radio, Wrench, AlertCircle, Settings, X, Key, Zap
+  HelpCircle, Radio, Wrench, AlertCircle, Settings, X, Key, Zap, Globe, MoreVertical
 } from 'lucide-react';
 import AIOrb from '../components/AIOrb';
 import PerceptionWidget from '../components/PerceptionWidget';
@@ -47,7 +47,17 @@ function levenshteinDistance(s1: string, s2: string): number {
   return dp[m][n];
 }
 
-const WAKE_PHRASES = ['hey markus', 'hey marcus', 'hi markus', 'hi marcus', 'markus', 'marcus', 'hey mark is', 'a markus'];
+const WAKE_PHRASES = [
+  'hey markus', 'hey marcus', 'hey mark', 'hey marcos', 'hey markers', 'hey makers', 'hey makus',
+  'hello markus', 'hello marcus', 'hello mark', 'hello marcos',
+  'hi markus', 'hi marcus', 'hi mark', 'hi marcos',
+  'ok markus', 'okay markus', 'ok mark', 'okay mark',
+  'markus', 'marcus', 'marcos', 'makus', 'mark',
+  'hey mark is', 'a markus', 'hey marker',
+  // Tamil phonetic variants
+  'ஹேய் மார்கஸ்', 'ஹே மார்கஸ்', 'ஹேய் மார்க்', 'ஹே மார்க்',
+  'மார்கஸ்', 'மார்க்கஸ்', 'மார்க்', 'வணக்கம் மார்கஸ்', 'வணக்கம் மார்க்'
+];
 
 function isFuzzyWakeWordMatch(transcript: string): boolean {
   if (!transcript) return false;
@@ -62,12 +72,17 @@ function isFuzzyWakeWordMatch(transcript: string): boolean {
     if (clean.includes(phrase)) return true;
   }
 
-  // 2. Tokenized distance check
-  const words = clean.split(' ');
+  // 2. Tokenized check
+  const words = clean.split(' ').filter(Boolean);
+  const targetWords = ['markus', 'marcus', 'marcos', 'makus', 'mark'];
+
   for (let i = 0; i < words.length; i++) {
     const singleWord = words[i];
-    if (levenshteinDistance(singleWord, 'markus') <= 1 || levenshteinDistance(singleWord, 'marcus') <= 1) {
-      return true;
+    for (const target of targetWords) {
+      const maxDist = target.length <= 4 ? 0 : (target.length <= 5 ? 1 : 2);
+      if (levenshteinDistance(singleWord, target) <= maxDist) {
+        return true;
+      }
     }
     if (i < words.length - 1) {
       const twoWords = `${words[i]} ${words[i + 1]}`;
@@ -87,7 +102,8 @@ function stripWakeWords(text: string): string {
     cleaned = cleaned.replace(new RegExp(`\\b${phrase}\\b`, 'gi'), ' ');
   }
   return cleaned
-    .replace(/\b(hey|hello|hi|ok|okay)?\s*(markus|marcus|makus|marcos|markers)\b/gi, ' ')
+    .replace(/\b(hey|hello|hi|ok|okay)?\s*(markus|marcus|makus|marcos|markers|makers|mark)\b/gi, ' ')
+    .replace(/(ஹேய்|ஹே|வணக்கம்)?\s*(மார்கஸ்|மார்க்கஸ்|மார்க்)/gi, ' ')
     .replace(/^[,\s.!?-]+|[,\s.!?-]+$/g, '')
     .trim();
 }
@@ -205,13 +221,18 @@ function safeEvaluateMath(expression: string): number | null {
 
 function playWakeChime() {
   try {
-    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
     osc.frequency.setValueAtTime(587.33, ctx.currentTime);
     osc.frequency.exponentialRampToValueAtTime(880.00, ctx.currentTime + 0.15);
-    gain.gain.setValueAtTime(0.2, ctx.currentTime);
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
     osc.connect(gain);
     gain.connect(ctx.destination);
@@ -234,6 +255,7 @@ export default function VoiceVisionHUD() {
   const [assistantReply, setAssistantReply] = useState('Markus AI ready. Ask any question or give any coding task (via voice or text).');
   const [isSpeakingVoice, setIsSpeakingVoice] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(true);
+  const [language, setLanguage] = useState<'ta-IN' | 'en-US'>(() => (localStorage.getItem('markus_language') as any) || 'en-US');
   const [voiceRate] = useState<number>(1.0);
   const [activeAgent, setActiveAgent] = useState<string>('Orchestrator');
   const [gatewayStatus, setGatewayStatus] = useState<string>('Connected');
@@ -242,8 +264,31 @@ export default function VoiceVisionHUD() {
   const [copiedText, setCopiedText] = useState(false);
   const [, setHistory] = useState<HistoryItem[]>([]);
 
+  const toggleLanguage = () => {
+    const nextLang = language === 'ta-IN' ? 'en-US' : 'ta-IN';
+    setLanguage(nextLang);
+    localStorage.setItem('markus_language', nextLang);
+  };
+
   // AI Provider Key Settings
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showOptionsMenu, setShowOptionsMenu] = useState(false);
+  const optionsMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (optionsMenuRef.current && !optionsMenuRef.current.contains(e.target as Node)) {
+        setShowOptionsMenu(false);
+      }
+    }
+    if (showOptionsMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showOptionsMenu]);
+
   const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem('markus_custom_api_key') || '');
   const [customProvider, setCustomProvider] = useState(() => localStorage.getItem('markus_custom_provider') || 'backend');
   const [customModel, setCustomModel] = useState(() => localStorage.getItem('markus_custom_model') || 'gpt-4o-mini');
@@ -264,31 +309,55 @@ export default function VoiceVisionHUD() {
   useEffect(() => { wakeWordOnlyModeRef.current = wakeWordOnlyMode; }, [wakeWordOnlyMode]);
   useEffect(() => { isMicListeningRef.current = isMicListening; }, [isMicListening]);
 
-  // Pre-cache TTS voice
+  // Pre-cache TTS voice (Prioritize Tamil when active)
   useEffect(() => {
     const pickVoice = () => {
       if (!('speechSynthesis' in window)) return;
       const voices = window.speechSynthesis.getVoices();
-      const preferred = [
-        'Google US English',
-        'Microsoft Zira',
-        'Microsoft David',
-        'Google UK English Male',
-        'Samantha',
-        'Alex',
-      ];
-      for (const name of preferred) {
-        const v = voices.find(voice => voice.name.includes(name));
-        if (v) { selectedVoiceRef.current = v; return; }
+      if (!voices || voices.length === 0) return;
+
+      if (language === 'ta-IN') {
+        // Priority for Tamil voices (e.g. Google தமிழ், Microsoft Pallavi, Microsoft Valluvar)
+        const tamilVoice = voices.find(v => 
+          v.lang.toLowerCase().replace('_', '-').startsWith('ta') ||
+          v.name.toLowerCase().includes('tamil') ||
+          v.name.toLowerCase().includes('valluvar') ||
+          v.name.toLowerCase().includes('pallavi')
+        );
+        if (tamilVoice) {
+          selectedVoiceRef.current = tamilVoice;
+          return;
+        }
+        // Fallback to Indian English (smooth Tanglish/Indian accent)
+        const inVoice = voices.find(v => v.lang.toLowerCase().includes('en-in') || v.name.toLowerCase().includes('india'));
+        if (inVoice) {
+          selectedVoiceRef.current = inVoice;
+          return;
+        }
+      } else {
+        const preferred = [
+          'Google US English',
+          'Microsoft Zira',
+          'Microsoft David',
+          'Google UK English Male',
+          'Samantha',
+          'Alex',
+        ];
+        for (const name of preferred) {
+          const v = voices.find(voice => voice.name.includes(name));
+          if (v) { selectedVoiceRef.current = v; return; }
+        }
+        const en = voices.find(v => v.lang.startsWith('en'));
+        if (en) { selectedVoiceRef.current = en; return; }
       }
-      const en = voices.find(v => v.lang.startsWith('en'));
-      if (en) selectedVoiceRef.current = en;
+
+      selectedVoiceRef.current = voices[0];
     };
 
     pickVoice();
     window.speechSynthesis?.addEventListener('voiceschanged', pickVoice);
     return () => window.speechSynthesis?.removeEventListener('voiceschanged', pickVoice);
-  }, []);
+  }, [language]);
 
   // ── Wake Word & Persistent Speech Recognition Setup (Client-Side Microphone Owner) ──
   useEffect(() => {
@@ -299,7 +368,7 @@ export default function VoiceVisionHUD() {
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
-    recognition.lang = 'en-US';
+    recognition.lang = language;
 
     recognition.onstart = () => {
       retryDelay = 250;
@@ -362,10 +431,13 @@ export default function VoiceVisionHUD() {
 
           if (commandBody.length > 0) {
             handleProcessRequestRef.current(commandBody);
-          } else if (hasWakeWord) {
-            setAssistantReply("Yes, I'm listening! What can I build or explain for you?");
+          } else if (hasWakeWord || isFuzzyWakeWordMatch(finalTranscript)) {
+            const wakeGreeting = language === 'ta-IN'
+              ? 'வணக்கம்! நான் கேட்கிறேன், சொல்லுங்கள்!'
+              : "Yes, I'm listening! How can I help you?";
+            setAssistantReply(wakeGreeting);
             setAiState('speaking');
-            speakResponse("Yes, I'm listening! How can I help you?");
+            speakResponse(wakeGreeting);
           }
         } else if (currentSpeech.trim() && !isProcessingRef.current) {
           // Debounce execution after 1.2s of silence when user stops talking
@@ -374,6 +446,13 @@ export default function VoiceVisionHUD() {
               const commandBody = stripWakeWords(currentSpeech);
               if (commandBody.length > 0) {
                 handleProcessRequestRef.current(commandBody);
+              } else if (isFuzzyWakeWordMatch(currentSpeech)) {
+                const wakeGreeting = language === 'ta-IN'
+                  ? 'வணக்கம்! நான் கேட்கிறேன், சொல்லுங்கள்!'
+                  : "Yes, I'm listening! How can I help you?";
+                setAssistantReply(wakeGreeting);
+                setAiState('speaking');
+                speakResponse(wakeGreeting);
               }
             }
           }, 1200);
@@ -420,7 +499,7 @@ export default function VoiceVisionHUD() {
       if (awakeTimerRef.current) clearTimeout(awakeTimerRef.current);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     };
-  }, [wakeWordOnlyMode, setAiState]);
+  }, [wakeWordOnlyMode, language, setAiState]);
 
   const toggleMicrophone = () => {
     if (!recognitionRef.current) return;
@@ -482,7 +561,16 @@ export default function VoiceVisionHUD() {
         } catch {}
 
         const utterance = new SpeechSynthesisUtterance(textToSpeak);
-        if (selectedVoiceRef.current) utterance.voice = selectedVoiceRef.current;
+        const hasTamil = /[\u0B80-\u0BFF]/.test(textToSpeak);
+        if (hasTamil) {
+          utterance.lang = 'ta-IN';
+          if (selectedVoiceRef.current) utterance.voice = selectedVoiceRef.current;
+        } else {
+          utterance.lang = 'en-US';
+          if (selectedVoiceRef.current && !selectedVoiceRef.current.lang.toLowerCase().startsWith('ta')) {
+            utterance.voice = selectedVoiceRef.current;
+          }
+        }
         utterance.rate = voiceRate;
         utterance.pitch = 1.0;
 
@@ -530,11 +618,12 @@ export default function VoiceVisionHUD() {
           .catch(() => resolve());
       }
     });
-  }, [voiceRate, setAiState]);
+  }, [voiceRate, language, setAiState]);
 
   const speakSentence = (sentenceText: string) => {
     if (!('speechSynthesis' in window) || !sentenceText) return;
     const utterance = new SpeechSynthesisUtterance(sentenceText);
+    utterance.lang = language;
     if (selectedVoiceRef.current) utterance.voice = selectedVoiceRef.current;
     utterance.rate = voiceRate;
     window.speechSynthesis.speak(utterance);
@@ -1649,7 +1738,12 @@ export default function VoiceVisionHUD() {
             body: JSON.stringify({
               model: customModel,
               messages: [
-                { role: 'system', content: 'You are Markus AI, an intelligent, versatile assistant and expert developer. Answer all user questions thoroughly, accurately, and conversationally across any topic — including general knowledge, science, philosophy, history, geography, and full-stack software development.' },
+                { 
+                  role: 'system', 
+                  content: language === 'ta-IN'
+                    ? 'You are Markus AI, an intelligent, versatile assistant and expert developer. You speak and communicate in Tamil (தமிழ்). Answer all user questions thoroughly, accurately, and conversationally in Tamil. You may use English for code or specific technical terms, but your spoken dialogue and explanations must be in natural Tamil. Do not respond or speak in Hindi.'
+                    : 'You are Markus AI, an intelligent, versatile assistant and expert developer. Answer all user questions thoroughly, accurately, and conversationally across any topic — including general knowledge, science, philosophy, history, geography, and full-stack software development.'
+                },
                 { role: 'user', content: inputStr }
               ],
             }),
@@ -1843,99 +1937,175 @@ export default function VoiceVisionHUD() {
             </button>
           )}
 
-          {/* AI Provider Config Button */}
-          <button
-            onClick={() => setShowSettingsModal(true)}
-            title="Configure AI Model / API Key"
-            style={{
-              background: customApiKey ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.05)',
-              border: customApiKey ? '1px solid #10B981' : '1px solid rgba(255, 255, 255, 0.1)',
-              borderRadius: 10,
-              padding: '8px 12px',
-              color: customApiKey ? '#10B981' : 'var(--text-muted)',
-              fontSize: '0.72rem',
-              fontWeight: 600,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-            }}
-          >
-            <Key size={14} />
-            <span>{customApiKey ? `${customProvider.toUpperCase()}` : 'AI MODEL / KEY'}</span>
-          </button>
+          {/* Settings & Options (Three Dots) Trigger */}
+          <div ref={optionsMenuRef} style={{ position: 'relative' }}>
+            <button
+              onClick={() => setShowOptionsMenu((prev) => !prev)}
+              title="Settings & Options"
+              aria-label="Settings and options"
+              style={{
+                background: showOptionsMenu ? 'rgba(0, 229, 255, 0.25)' : 'rgba(255, 255, 255, 0.06)',
+                border: showOptionsMenu ? '1px solid #00E5FF' : '1px solid rgba(255, 255, 255, 0.14)',
+                borderRadius: 10,
+                padding: '8px 12px',
+                color: showOptionsMenu ? '#00E5FF' : 'var(--text-muted)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                backdropFilter: 'blur(10px)',
+                transition: 'all 0.2s',
+                boxShadow: showOptionsMenu ? '0 0 16px rgba(0, 229, 255, 0.35)' : 'none',
+              }}
+            >
+              <MoreVertical size={16} />
+            </button>
 
-          {/* Wake Word Standby / Continuous Toggle */}
-          <button
-            onClick={() => setWakeWordOnlyMode(!wakeWordOnlyMode)}
-            title={wakeWordOnlyMode ? 'Wake Word Mode (Responds on "Hey Markus")' : 'Continuous Listening Mode (Responds to all speech)'}
-            style={{
-              background: wakeWordOnlyMode ? 'rgba(0, 229, 255, 0.12)' : 'rgba(139, 92, 246, 0.15)',
-              border: wakeWordOnlyMode ? '1px solid rgba(0, 229, 255, 0.3)' : '1px solid rgba(139, 92, 246, 0.35)',
-              borderRadius: 10,
-              padding: '8px 12px',
-              color: wakeWordOnlyMode ? '#00E5FF' : '#A78BFA',
-              fontSize: '0.72rem',
-              fontWeight: 600,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-            }}
-          >
-            <Radio size={14} />
-            <span>{wakeWordOnlyMode ? 'WAKE WORD: HEY MARKUS' : 'ALL SPEECH ACTIVE'}</span>
-          </button>
+            {/* Dropdown Menu — opens and displays all fields when three dots is clicked */}
+            {showOptionsMenu && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 10px)',
+                  right: 0,
+                  zIndex: 250,
+                  background: 'rgba(8, 14, 26, 0.96)',
+                  backdropFilter: 'blur(20px)',
+                  border: '1px solid rgba(0, 229, 255, 0.3)',
+                  borderRadius: 14,
+                  padding: '10px 12px',
+                  boxShadow: '0 12px 40px rgba(0, 0, 0, 0.75), 0 0 24px rgba(0, 229, 255, 0.18)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  flexWrap: 'wrap',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {/* AI Provider Config Button */}
+                <button
+                  onClick={() => {
+                    setShowSettingsModal(true);
+                    setShowOptionsMenu(false);
+                  }}
+                  title="Configure AI Model / API Key"
+                  style={{
+                    background: customApiKey ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                    border: customApiKey ? '1px solid #10B981' : '1px solid rgba(255, 255, 255, 0.1)',
+                    borderRadius: 10,
+                    padding: '8px 12px',
+                    color: customApiKey ? '#10B981' : 'var(--text-muted)',
+                    fontSize: '0.72rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <Key size={14} />
+                  <span>{customApiKey ? `${customProvider.toUpperCase()}` : 'AI MODEL / KEY'}</span>
+                </button>
 
-          {/* Voice Output Toggle */}
-          <button
-            onClick={() => setTtsEnabled(!ttsEnabled)}
-            title={ttsEnabled ? 'Mute Voice' : 'Enable Voice'}
-            style={{
-              background: ttsEnabled ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.05)',
-              border: ttsEnabled ? '1px solid rgba(0, 229, 255, 0.3)' : '1px solid rgba(255, 255, 255, 0.1)',
-              borderRadius: 10,
-              padding: '8px 14px',
-              color: ttsEnabled ? '#00E5FF' : 'var(--text-muted)',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              fontSize: '0.75rem',
-              fontWeight: 600,
-              backdropFilter: 'blur(10px)',
-              transition: 'all 0.2s',
-            }}
-          >
-            {ttsEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
-            <span>{ttsEnabled ? 'VOICE ON' : 'VOICE MUTED'}</span>
-          </button>
+                {/* Wake Word Standby / Continuous Toggle */}
+                <button
+                  onClick={() => setWakeWordOnlyMode(!wakeWordOnlyMode)}
+                  title={wakeWordOnlyMode ? 'Wake Word Mode (Responds on "Hey Markus")' : 'Continuous Listening Mode (Responds to all speech)'}
+                  style={{
+                    background: wakeWordOnlyMode ? 'rgba(0, 229, 255, 0.12)' : 'rgba(139, 92, 246, 0.15)',
+                    border: wakeWordOnlyMode ? '1px solid rgba(0, 229, 255, 0.3)' : '1px solid rgba(139, 92, 246, 0.35)',
+                    borderRadius: 10,
+                    padding: '8px 12px',
+                    color: wakeWordOnlyMode ? '#00E5FF' : '#A78BFA',
+                    fontSize: '0.72rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <Radio size={14} />
+                  <span>{wakeWordOnlyMode ? 'WAKE WORD: HEY MARKUS' : 'ALL SPEECH ACTIVE'}</span>
+                </button>
 
-          {/* Microphone Toggle */}
-          <button
-            onClick={toggleMicrophone}
-            title={isMicListening ? 'Disable Microphone' : 'Enable Microphone'}
-            style={{
-              background: isMicListening ? 'rgba(0, 229, 255, 0.25)' : 'rgba(255, 255, 255, 0.05)',
-              border: isMicListening ? '1px solid #00E5FF' : '1px solid rgba(255, 255, 255, 0.15)',
-              borderRadius: 10,
-              padding: '8px 16px',
-              color: isMicListening ? '#00E5FF' : 'var(--text-muted)',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              fontSize: '0.75rem',
-              fontWeight: 700,
-              letterSpacing: '0.05em',
-              boxShadow: isMicListening ? '0 0 20px rgba(0, 229, 255, 0.35)' : 'none',
-              backdropFilter: 'blur(10px)',
-              transition: 'all 0.2s',
-            }}
-          >
-            {isMicListening ? <Mic size={16} /> : <MicOff size={16} />}
-            <span>{isMicListening ? 'MIC ACTIVE' : 'ENABLE MIC'}</span>
-          </button>
+                {/* Language Selector (Tamil / English) */}
+                <button
+                  onClick={toggleLanguage}
+                  title={language === 'ta-IN' ? 'Language: Tamil (தமிழ்) — Click to switch to English' : 'Language: English — Click to switch to Tamil'}
+                  style={{
+                    background: language === 'ta-IN' ? 'rgba(245, 158, 11, 0.16)' : 'rgba(0, 229, 255, 0.12)',
+                    border: language === 'ta-IN' ? '1px solid rgba(245, 158, 11, 0.45)' : '1px solid rgba(0, 229, 255, 0.3)',
+                    borderRadius: 10,
+                    padding: '8px 14px',
+                    color: language === 'ta-IN' ? '#FBBF24' : '#00E5FF',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    backdropFilter: 'blur(10px)',
+                    transition: 'all 0.2s',
+                    boxShadow: language === 'ta-IN' ? '0 0 12px rgba(245, 158, 11, 0.25)' : 'none',
+                  }}
+                >
+                  <Globe size={15} />
+                  <span>{language === 'ta-IN' ? '🇮🇳 தமிழ் (TAMIL)' : '🌐 ENGLISH'}</span>
+                </button>
+
+                {/* Voice Output Toggle */}
+                <button
+                  onClick={() => setTtsEnabled(!ttsEnabled)}
+                  title={ttsEnabled ? 'Mute Voice' : 'Enable Voice'}
+                  style={{
+                    background: ttsEnabled ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                    border: ttsEnabled ? '1px solid rgba(0, 229, 255, 0.3)' : '1px solid rgba(255, 255, 255, 0.1)',
+                    borderRadius: 10,
+                    padding: '8px 14px',
+                    color: ttsEnabled ? '#00E5FF' : 'var(--text-muted)',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                    backdropFilter: 'blur(10px)',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  {ttsEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
+                  <span>{ttsEnabled ? 'VOICE ON' : 'VOICE MUTED'}</span>
+                </button>
+
+                {/* Microphone Toggle */}
+                <button
+                  onClick={toggleMicrophone}
+                  title={isMicListening ? 'Disable Microphone' : 'Enable Microphone'}
+                  style={{
+                    background: isMicListening ? 'rgba(0, 229, 255, 0.25)' : 'rgba(255, 255, 255, 0.05)',
+                    border: isMicListening ? '1px solid #00E5FF' : '1px solid rgba(255, 255, 255, 0.15)',
+                    borderRadius: 10,
+                    padding: '8px 16px',
+                    color: isMicListening ? '#00E5FF' : 'var(--text-muted)',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    letterSpacing: '0.05em',
+                    boxShadow: isMicListening ? '0 0 20px rgba(0, 229, 255, 0.35)' : 'none',
+                    backdropFilter: 'blur(10px)',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  {isMicListening ? <Mic size={16} /> : <MicOff size={16} />}
+                  <span>{isMicListening ? 'MIC ACTIVE' : 'ENABLE MIC'}</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 

@@ -34,6 +34,11 @@ INTENT_TO_AISTATE: dict[IntentType, AIState] = {
     IntentType.ARCHITECTURE: AIState.PLANNING,
     IntentType.AUTOMATION: AIState.EXECUTING,
     IntentType.SYSTEM_CONTROL: AIState.EXECUTING,
+    IntentType.APP_CONTROL: AIState.EXECUTING,
+    IntentType.BROWSER_AUTOMATION: AIState.EXECUTING,
+    IntentType.YOUTUBE: AIState.EXECUTING,
+    IntentType.VOICE_COMMAND: AIState.EXECUTING,
+    IntentType.SEARCH: AIState.RESEARCH,
     IntentType.CHAT: AIState.THINKING,
 }
 

@@ -14,13 +14,25 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8010',
         changeOrigin: true,
+        secure: false,
+        configure: (proxy) => {
+          proxy.on('error', (_err, _req, res: any) => {
+            if (res && !res.headersSent && typeof res.writeHead === 'function') {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Backend server restarting or unavailable' }));
+            }
+          });
+        },
       },
       '/ws': {
-        target: 'ws://localhost:8000',
+        target: 'ws://127.0.0.1:8010',
         ws: true,
         changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('error', () => {});
+        },
       },
     },
   },

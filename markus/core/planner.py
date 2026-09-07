@@ -39,6 +39,8 @@ class PlanStep:
     status: PlanStepStatus = PlanStepStatus.PENDING
     result: Optional[str] = None
     error: Optional[str] = None
+    verified: bool = False
+    verification_details: Optional[dict] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
 
@@ -118,7 +120,13 @@ class Planner:
             "risk_level": "low",
         }])
 
-    def advance_step(self, plan_id: str, result: Optional[str] = None) -> Optional[PlanStep]:
+    def advance_step(
+        self,
+        plan_id: str,
+        result: Optional[str] = None,
+        verified: bool = True,
+        verification_details: Optional[dict] = None,
+    ) -> Optional[PlanStep]:
         """Mark the current step as completed and advance to the next."""
         plan = self._active_plans.get(plan_id)
         if not plan or not plan.current_step:
@@ -127,6 +135,8 @@ class Planner:
         current = plan.current_step
         current.status = PlanStepStatus.COMPLETED
         current.result = result
+        current.verified = verified
+        current.verification_details = verification_details
         current.completed_at = datetime.now().isoformat()
 
         plan.current_step_index += 1

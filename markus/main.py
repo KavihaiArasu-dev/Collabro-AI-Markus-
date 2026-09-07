@@ -157,10 +157,11 @@ async def health():
 
 # ── Run ──
 if __name__ == "__main__":
+    should_reload = "--reload" in sys.argv
     uvicorn.run(
         "main:app",
         host=settings.host,
         port=settings.port,
-        reload=settings.is_development,
+        reload=should_reload,
         log_level=settings.log_level.lower(),
     )

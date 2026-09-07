@@ -173,8 +173,26 @@ class FaceRecognizer:
             else:
                 gray = aligned_face
 
+            # Bilateral filter to smooth sensor camera noise while preserving sharp facial edges
+            gray = cv2.bilateralFilter(gray, d=5, sigmaColor=30, sigmaSpace=30)
+
+            # Backlighting & shadow compensation via adaptive gamma normalization
+            mean_intensity = float(np.mean(gray))
+            if mean_intensity < 105:
+                # Underexposed face from backlight: boost shadows to reveal facial features
+                gamma = 1.6
+                inv_gamma = 1.0 / gamma
+                table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                gray = cv2.LUT(gray, table)
+            elif mean_intensity > 195:
+                # Overexposed face: compress highlights
+                gamma = 0.8
+                inv_gamma = 1.0 / gamma
+                table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                gray = cv2.LUT(gray, table)
+
             # CLAHE illumination normalization to defeat shadows & glare
-            clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+            clahe = cv2.createCLAHE(clipLimit=2.4, tileGridSize=(8, 8))
             norm_gray = clahe.apply(gray)
             norm_gray = cv2.resize(norm_gray, (112, 112), interpolation=cv2.INTER_AREA)
 
@@ -210,7 +228,7 @@ class FaceRecognizer:
             return None
 
     def compute_similarity(self, sig1: List[float], sig2: List[float]) -> float:
-        """Compute Chi-Square similarity score between two normalized LBP vectors [0.0 - 1.0]."""
+        """Compute hybrid Chi-Square & Cosine similarity score between two normalized LBP vectors [0.0 - 1.0]."""
         if not sig1 or not sig2 or len(sig1) != len(sig2):
             return 0.0
 
@@ -219,7 +237,17 @@ class FaceRecognizer:
 
         eps = 1e-10
         chi2 = 0.5 * np.sum(((v1 - v2) ** 2) / (v1 + v2 + eps))
-        sim = float(np.exp(-chi2 * 1.8))
+        sim_chi2 = float(np.exp(-chi2 * 1.8))
+
+        # Cosine correlation component
+        norm1 = float(np.linalg.norm(v1))
+        norm2 = float(np.linalg.norm(v2))
+        if norm1 > 0 and norm2 > 0:
+            sim_cos = float(np.dot(v1, v2) / (norm1 * norm2))
+            sim = 0.70 * sim_chi2 + 0.30 * max(0.0, sim_cos)
+        else:
+            sim = sim_chi2
+
         return max(0.0, min(1.0, sim))
 
     def register_face(
@@ -295,6 +323,87 @@ class FaceRecognizer:
         logger.info(f"Registered face sample for '{trimmed_name}' (Total samples: {self.profiles[trimmed_name]['samples_count']})")
         return True
 
+    def verify_identity_with_gemini(
+        self,
+        face_crop_np: np.ndarray,
+        candidate_name: str,
+    ) -> Optional[float]:
+        """
+        Verify face identity using Google Gemini Multimodal Vision API against enrolled reference photos.
+        Returns confidence score [0.0 - 1.0] or None if unavailable.
+        """
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not gemini_key or face_crop_np is None or face_crop_np.size == 0:
+            return None
+
+        profile = self.profiles.get(candidate_name)
+        if not profile:
+            return None
+
+        img_paths = profile.get("image_paths", [])
+        ref_path = None
+        for p in reversed(img_paths):
+            if os.path.exists(p):
+                ref_path = p
+                break
+
+        if not ref_path:
+            return None
+
+        try:
+            import base64
+            import httpx
+
+            # Encode query face
+            _, q_buf = cv2.imencode(".jpg", face_crop_np, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            q_b64 = base64.b64encode(q_buf.tobytes()).decode("utf-8")
+
+            # Encode reference face
+            with open(ref_path, "rb") as rf:
+                ref_b64 = base64.b64encode(rf.read()).decode("utf-8")
+
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "text": (
+                                    f"Compare these two face images. Image 1 is a known enrolled photo of '{candidate_name}'. "
+                                    "Image 2 is a newly captured live webcam frame. "
+                                    "Determine if they belong to the same person. "
+                                    "Output strictly a JSON object: {{\"match\": true/false, \"confidence\": float}}."
+                                )
+                            },
+                            {"inline_data": {"mime_type": "image/jpeg", "data": ref_b64}},
+                            {"inline_data": {"mime_type": "image/jpeg", "data": q_b64}},
+                        ]
+                    }
+                ],
+                "generationConfig": {"temperature": 0.0, "maxOutputTokens": 100},
+            }
+
+            model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+            with httpx.Client(timeout=4.0) as client:
+                res = client.post(url, json=payload)
+                if res.status_code == 200:
+                    data = res.json()
+                    candidates = data.get("candidates", [])
+                    if candidates and "content" in candidates[0]:
+                        parts = candidates[0]["content"].get("parts", [])
+                        text = "".join(p.get("text", "") for p in parts).strip()
+                        json_match = re.search(r"\{.*?\}", text, re.DOTALL)
+                        if json_match:
+                            parsed = json.loads(json_match.group(0))
+                            if parsed.get("match") is True:
+                                return float(parsed.get("confidence", 0.94))
+                            elif parsed.get("match") is False:
+                                return float(1.0 - parsed.get("confidence", 0.85))
+        except Exception as e:
+            logger.debug(f"Gemini face verification error: {e}")
+
+        return None
+
     def recognize_face(
         self,
         image_np: np.ndarray,
@@ -335,23 +444,37 @@ class FaceRecognizer:
                     best_similarity = sim
                     best_name = name
 
+        profile_names = list(self.profiles.keys())
+
+        # 1. Standard high-confidence match
         if best_similarity >= self.match_threshold:
-            # Calibrate confidence to intuitive [0.80 - 0.99] range
-            confidence = min(0.99, max(0.80, best_similarity + 0.05))
-
-            # Auto-enroll high confidence sightings if under sample limit
-            if confidence > 0.94 and best_name in self.profiles:
+            confidence = min(0.99, max(0.82, best_similarity + 0.05))
+            if confidence > 0.92 and best_name in self.profiles:
                 p = self.profiles[best_name]
-                if p.get("samples_count", 0) < self.max_samples_per_person:
-                    # Non-blocking background sample addition
-                    p["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
-
+                p["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             return (best_name, round(confidence, 2))
 
-        # If only 1 primary owner profile exists in database, assign owner profile gracefully
-        profile_names = list(self.profiles.keys())
-        if len(profile_names) == 1 and best_name == "Unknown":
-            return (profile_names[0], 0.92)
+        # 2. Borderline Gemini Vision verification
+        if best_similarity >= 0.50 and best_name != "Unknown":
+            gemini_conf = self.verify_identity_with_gemini(aligned, best_name)
+            if gemini_conf is not None and gemini_conf >= 0.75:
+                logger.info(f"Gemini Vision verified identity '{best_name}' (conf: {gemini_conf})")
+                return (best_name, round(gemini_conf, 2))
+
+        # 3. Single primary owner resolution:
+        # If exactly 1 enrolled profile exists (e.g. "Kavihai Arasu (Owner)"),
+        # and similarity is above baseline 0.35 (accounting for webcam shadows, backlighting & glasses):
+        if len(profile_names) == 1:
+            owner_name = profile_names[0]
+            if best_similarity >= 0.35 or best_name == owner_name:
+                confidence = min(0.98, max(0.86, best_similarity + 0.35))
+                self.profiles[owner_name]["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                return (owner_name, round(confidence, 2))
+
+        # 4. Multi-profile balanced match (threshold 0.58)
+        if best_similarity >= 0.58 and best_name != "Unknown":
+            confidence = min(0.95, max(0.80, best_similarity + 0.15))
+            return (best_name, round(confidence, 2))
 
         return ("Unknown", round(max(0.60, best_similarity), 2))
 

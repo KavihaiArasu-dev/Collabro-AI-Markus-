@@ -51,6 +51,25 @@ class TestSpeechAndVision(unittest.TestCase):
         self.assertIn("Multimodal Perception Context", system_msg)
         self.assertIn("Visible facial expression appears happy", system_msg)
 
+    def test_stt_transcribe_audio_empty_bytes(self):
+        from speech.stt import stt_engine
+        res = stt_engine.transcribe_audio_bytes(b"")
+        self.assertEqual(res, "")
+
+    def test_face_recognizer_hybrid_similarity(self):
+        from vision.face_recognition import FaceRecognizer
+        fr = FaceRecognizer()
+        v1 = [0.1] * 100
+        v2 = [0.1] * 100
+        sim = fr.compute_similarity(v1, v2)
+        self.assertGreater(sim, 0.95)
+
+        # Orthogonal vectors should have low similarity
+        v3 = [1.0 if i < 50 else 0.0 for i in range(100)]
+        v4 = [0.0 if i < 50 else 1.0 for i in range(100)]
+        sim_ortho = fr.compute_similarity(v3, v4)
+        self.assertLess(sim_ortho, sim)
+
 
 if __name__ == "__main__":
     unittest.main()

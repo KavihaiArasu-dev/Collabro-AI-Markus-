@@ -142,6 +142,17 @@ class ContextManager:
         if base_prompt:
             parts.append(base_prompt)
 
+        # Add Language Directive (§6)
+        from config.settings import settings
+        if settings.voice.language.lower().startswith("ta"):
+            parts.append(
+                "\n## Language Directive\n"
+                "You communicate primarily in Tamil (தமிழ்). "
+                "All your responses, spoken dialogue, and conversational answers must be in natural, polite Tamil. "
+                "You may use Tamil script or Tanglish as appropriate, and maintain standard English for technical terms or code. "
+                "Never speak or reply in Hindi."
+            )
+
         # Add Multimodal Perception Context (§6c)
         if ctx.perception:
             perception_str = ctx.perception.to_prompt_context()

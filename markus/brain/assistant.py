@@ -57,6 +57,16 @@ class PersonalAssistant:
             perception_context=perception_str if perception_str else "[Perception: Laptop Camera & Microphone Active]",
             rag_context=rag_str if rag_str else "",
         )
+
+        # 3. Chrome Web Automation Directive if web/browser/website is relevant
+        lower_q = user_query.lower()
+        if any(k in lower_q for k in [
+            "chrome", "website", "browser", "youtube", "play", "google", "search", "gmail",
+            "github", "open http", "open https", "open www", ".com", ".org", ".io", ".in"
+        ]):
+            from core.prompts import CHROME_AUTOMATION_SYSTEM_PROMPT
+            prompt += f"\n\n{CHROME_AUTOMATION_SYSTEM_PROMPT}"
+
         return prompt.strip()
 
     async def generate_response(

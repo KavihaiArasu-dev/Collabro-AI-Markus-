@@ -3,6 +3,7 @@ Markus AI — Agent Orchestrator (§5)
 
 Coordinates every agent. Routes tasks, manages workflows,
 handles agent communication, and resolves conflicts.
+Includes a voice-command fast path for instant tool execution.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import AsyncGenerator, Optional
 from config.constants import AgentType, IntentType
 from core.intent_classifier import intent_classifier
 from core.event_bus import event_bus, Event
+from core.voice_command_processor import voice_command_processor
 from .base_agent import BaseAgent
 from .implementations import (
     CoderAgent, ArchitectAgent, ReviewerAgent, DebugAgent,
@@ -35,6 +37,8 @@ INTENT_TO_AGENT: dict[IntentType, AgentType] = {
     IntentType.FILE_OPERATION: AgentType.AUTOMATION,
     IntentType.APP_CONTROL: AgentType.AUTOMATION,
     IntentType.BROWSER_AUTOMATION: AgentType.AUTOMATION,
+    IntentType.YOUTUBE: AgentType.AUTOMATION,
+    IntentType.VOICE_COMMAND: AgentType.AUTOMATION,
     IntentType.MULTI_STEP_ACTION: AgentType.ARCHITECT,
     IntentType.MEMORY: AgentType.MEMORY,
     IntentType.CHAT: AgentType.RESEARCHER,
@@ -46,6 +50,7 @@ class Orchestrator:
     The central coordinator for all agents.
 
     Responsibilities:
+    - Try voice-command fast path for instant tool execution
     - Classify user intent
     - Route tasks to the appropriate agent
     - Coordinate multi-agent workflows (e.g., Architect → Coder → Reviewer)
@@ -73,6 +78,19 @@ class Orchestrator:
         """Get an agent by type."""
         return self._agents.get(agent_type)
 
+    def _try_voice_command(self, user_input: str) -> Optional[str]:
+        """
+        Try to execute as a direct voice command (fast path).
+
+        Returns the response string if it matched, or None if the
+        input should be routed to an LLM agent instead.
+        """
+        result = voice_command_processor.try_execute(user_input)
+        if result.matched:
+            logger.info(f"Voice command fast path: {result.action} → {result.response[:80]}")
+            return result.response
+        return None
+
     async def route_and_process(
         self,
         user_input: str,
@@ -82,10 +100,20 @@ class Orchestrator:
         """
         Route a task to the appropriate agent and return the response.
 
-        If agent_type is specified, route directly to that agent.
-        Otherwise, classify intent and route accordingly.
+        First tries the voice-command fast path for instant execution.
+        If that doesn't match, classifies intent and routes to an agent.
         """
-        # Determine which agent to use
+        # ── Fast path: direct voice command execution ──
+        if not agent_type:
+            fast_result = self._try_voice_command(user_input)
+            if fast_result is not None:
+                await event_bus.emit("voice_command_executed", "orchestrator", {
+                    "input": user_input[:200],
+                    "result": fast_result[:200],
+                })
+                return fast_result
+
+        # ── Normal path: classify and route to agent ──
         if agent_type:
             try:
                 target_agent_type = AgentType(agent_type)
@@ -115,7 +143,20 @@ class Orchestrator:
         agent_type: Optional[str] = None,
         context: Optional[dict] = None,
     ) -> AsyncGenerator[str, None]:
-        """Route and stream the response."""
+        """
+        Route and stream the response.
+
+        For voice commands, yields the full response at once.
+        For LLM tasks, streams token by token.
+        """
+        # ── Fast path: direct voice command execution ──
+        if not agent_type:
+            fast_result = self._try_voice_command(user_input)
+            if fast_result is not None:
+                yield fast_result
+                return
+
+        # ── Normal path ──
         if agent_type:
             try:
                 target_agent_type = AgentType(agent_type)
