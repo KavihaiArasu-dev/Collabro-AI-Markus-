@@ -2,7 +2,6 @@
  * Markus AI — Memory Manager (§6b)
  *
  * Layered memory system with short-term (in-memory) and persistent (SQLite) storage.
- * Direct port from memory/memory_manager.py.
  */
 
 import { MemoryCategory, MemoryType } from "@/lib/config/constants";
@@ -20,11 +19,27 @@ interface MemoryEntry {
   accessCount: number;
 }
 
+// Map category to memory type once
+const CATEGORY_TO_TYPE: Record<MemoryCategory, MemoryType> = {
+  [MemoryCategory.TEMPORARY]: MemoryType.SHORT_TERM,
+  [MemoryCategory.SESSION]: MemoryType.EPISODIC,
+  [MemoryCategory.PREFERENCE]: MemoryType.PREFERENCE,
+  [MemoryCategory.PROJECT]: MemoryType.PROJECT,
+  [MemoryCategory.IMPORTANT]: MemoryType.EPISODIC,
+};
+
 class MemoryManager {
   private _shortTerm: MemoryEntry[] = [];
   private _maxShortTerm: number = 100;
   private _dbPath: string;
   private _dbInitialized: boolean = false;
+  private _dbFailed: boolean = false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _db: any = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _insertStmt: any = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _searchStmt: any = null;
 
   constructor(dbPath: string = "./data/memory.db") {
     this._dbPath = dbPath;
@@ -32,16 +47,34 @@ class MemoryManager {
   }
 
   /**
-   * Initialize SQLite database with better-sqlite3 (lazy).
+   * Initialize and get SQLite database with better-sqlite3 (lazy persistent handle).
    */
-  private _initDb(): void {
-    if (this._dbInitialized) return;
+  private _getDb(): unknown {
+    if (this._db) return this._db;
+    if (this._dbFailed) return null;
     try {
+      // Ensure directory exists
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const path = require("path");
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require("fs");
+      const dir = path.dirname(this._dbPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
       // Use dynamic import to avoid issues in edge runtime
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const Database = require("better-sqlite3");
-      const db = new Database(this._dbPath);
-      db.exec(`
+      this._db = new Database(this._dbPath);
+      try {
+        this._db.pragma("journal_mode = WAL");
+        this._db.pragma("synchronous = NORMAL");
+      } catch {
+        // Pragma may fail in memory or locked modes, ignore
+      }
+
+      this._db.exec(`
         CREATE TABLE IF NOT EXISTS memories (
           id TEXT PRIMARY KEY,
           content TEXT NOT NULL,
@@ -54,11 +87,30 @@ class MemoryManager {
           access_count INTEGER DEFAULT 0
         )
       `);
-      db.close();
+
+      this._insertStmt = this._db.prepare(
+        `INSERT OR REPLACE INTO memories (id, content, category, memory_type, tags, importance, created_at, last_accessed_at, access_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      this._searchStmt = this._db.prepare(
+        `SELECT * FROM memories WHERE content LIKE ? ORDER BY importance DESC LIMIT ?`,
+      );
+
       this._dbInitialized = true;
+      return this._db;
     } catch (e) {
       console.warn(`Memory DB init failed (expected in edge runtime): ${e}`);
+      this._db = null;
+      this._dbFailed = true;
+      return null;
     }
+  }
+
+  /**
+   * Initialize SQLite database (lazy).
+   */
+  private _initDb(): void {
+    this._getDb();
   }
 
   /**
@@ -143,26 +195,14 @@ class MemoryManager {
   }
 
   private _categoryToType(category: MemoryCategory): MemoryType {
-    const mapping: Record<MemoryCategory, MemoryType> = {
-      [MemoryCategory.TEMPORARY]: MemoryType.SHORT_TERM,
-      [MemoryCategory.SESSION]: MemoryType.EPISODIC,
-      [MemoryCategory.PREFERENCE]: MemoryType.PREFERENCE,
-      [MemoryCategory.PROJECT]: MemoryType.PROJECT,
-      [MemoryCategory.IMPORTANT]: MemoryType.EPISODIC,
-    };
-    return mapping[category] ?? MemoryType.SHORT_TERM;
+    return CATEGORY_TO_TYPE[category] ?? MemoryType.SHORT_TERM;
   }
 
   private _persistMemory(entry: MemoryEntry): void {
     try {
-      this._initDb();
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const Database = require("better-sqlite3");
-      const db = new Database(this._dbPath);
-      db.prepare(
-        `INSERT OR REPLACE INTO memories (id, content, category, memory_type, tags, importance, created_at, last_accessed_at, access_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+      this._getDb();
+      if (!this._insertStmt) return;
+      this._insertStmt.run(
         entry.id,
         entry.content,
         entry.category,
@@ -173,7 +213,6 @@ class MemoryManager {
         entry.lastAccessedAt,
         entry.accessCount,
       );
-      db.close();
     } catch (e) {
       console.warn(`Failed to persist memory: ${e}`);
     }
@@ -181,16 +220,9 @@ class MemoryManager {
 
   private _searchPersistent(query: string, limit: number): MemoryEntry[] {
     try {
-      this._initDb();
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const Database = require("better-sqlite3");
-      const db = new Database(this._dbPath);
-      const rows = db
-        .prepare(
-          `SELECT * FROM memories WHERE content LIKE ? ORDER BY importance DESC LIMIT ?`,
-        )
-        .all(`%${query}%`, limit);
-      db.close();
+      this._getDb();
+      if (!this._searchStmt) return [];
+      const rows = this._searchStmt.all(`%${query}%`, limit);
 
       return (rows as Record<string, unknown>[]).map((row) => ({
         id: row.id as string,
@@ -205,6 +237,21 @@ class MemoryManager {
       }));
     } catch {
       return [];
+    }
+  }
+
+  close(): void {
+    if (this._db) {
+      try {
+        this._db.close();
+      } catch {
+        // Ignore close errors
+      }
+      this._db = null;
+      this._insertStmt = null;
+      this._searchStmt = null;
+      this._dbInitialized = false;
+      this._dbFailed = false;
     }
   }
 }

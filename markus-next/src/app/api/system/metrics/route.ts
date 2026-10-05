@@ -1,6 +1,5 @@
 /**
- * Markus AI — System API Routes
- * Port of /api/system/* from FastAPI.
+ * Markus AI — System Metrics API Route
  */
 
 import { NextResponse } from "next/server";

@@ -1,6 +1,5 @@
 /**
  * Markus AI — Agents API Routes
- * Port of /api/agents from FastAPI.
  */
 
 import { NextResponse } from "next/server";

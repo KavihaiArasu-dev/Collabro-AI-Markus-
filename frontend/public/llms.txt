@@ -1,0 +1,24 @@
+# Markus AI — Operating System for Developers
+
+> Markus AI is a local-first, privacy-focused autonomous AI Operating System and multi-agent development platform that runs directly on your machine.
+
+## Overview
+Markus AI orchestrates specialized autonomous agents (Coding, Architect, Research, Debugging, Vision, Voice) powered by local models (via Ollama) or cloud providers (OpenAI, Anthropic, Groq, OpenRouter) through a unified OmniRoute gateway.
+
+## Core Capabilities
+- [Voice & Vision HUD](/): Real-time interactive AI Mind Orb with speech-to-text, natural voice synthesis, and facial emotion biometric tracking.
+- [Multi-Agent Mesh](/api/agents): Autonomous orchestrator delegating planning, coding, verification, and file operations.
+- [RAG & Vector Memory](/api/rag): Semantic retrieval over local workspace documents, codebases, and long-term conversation history.
+- [OmniRoute Gateway](http://localhost:20128): Unified OpenAI-compatible routing gateway supporting dynamic model switching and fallbacks.
+
+## API & Endpoints
+- `GET /api/health`: Health status and service diagnostics.
+- `POST /api/chat`: Multi-turn streaming chat endpoint with tool execution.
+- `POST /api/agents`: Multi-agent orchestration and task decomposition.
+- `POST /api/rag`: Semantic document search and embedding retrieval.
+- `GET /api/system/metrics`: Real-time system telemetry (CPU, RAM, GPU, Model status).
+
+## Architecture & Safety
+- **Local-First Execution**: Sensitive files and code never leave the local environment unless cloud routing is explicitly enabled.
+- **Granular Permissions**: File writes, command execution, and browser actions require confirmation tokens or explicit capability access.
+- **Zero-Layout-Shift HUD**: GPU-composited hardware-accelerated interface designed for sub-millisecond response times.

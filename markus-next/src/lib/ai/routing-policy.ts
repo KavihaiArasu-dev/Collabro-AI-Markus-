@@ -2,7 +2,6 @@
  * Markus AI — Routing Policy (§6a)
  *
  * Provider tier definitions and Markus-level routing policy.
- * Direct port from ai/routing_policy.py.
  */
 
 import { RouteAlias, ProviderTier, IntentType } from "@/lib/config/constants";
@@ -93,12 +92,10 @@ class RoutingPolicy {
     return route;
   }
 
+  private static readonly TIER_INFO_CACHE: Record<string, { name: string; providers: string[]; useCases: string }> = Object.freeze({ ...RoutingPolicy.TIERS });
+
   getTierInfo(): Record<string, { name: string; providers: string[]; useCases: string }> {
-    const result: Record<string, { name: string; providers: string[]; useCases: string }> = {};
-    for (const [tier, info] of Object.entries(RoutingPolicy.TIERS)) {
-      result[tier] = info;
-    }
-    return result;
+    return RoutingPolicy.TIER_INFO_CACHE;
   }
 }
 

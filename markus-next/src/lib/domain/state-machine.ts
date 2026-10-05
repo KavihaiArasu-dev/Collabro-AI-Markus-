@@ -1,6 +1,5 @@
 /**
  * Markus AI — Conversation & Assistant State Machine (§2, §3)
- * Direct port from domain/state_machine.py.
  */
 
 export enum ConversationState {
@@ -19,7 +18,9 @@ export class InvalidTransitionError extends Error {
   }
 }
 
-const VALID_TRANSITIONS: Record<ConversationState, Set<ConversationState>> = {
+const EMPTY_SET: ReadonlySet<ConversationState> = new Set();
+
+const VALID_TRANSITIONS: Readonly<Record<ConversationState, ReadonlySet<ConversationState>>> = {
   [ConversationState.IDLE]: new Set([ConversationState.ACTIVATED, ConversationState.LISTENING, ConversationState.ERROR]),
   [ConversationState.ACTIVATED]: new Set([ConversationState.LISTENING, ConversationState.IDLE, ConversationState.ERROR]),
   [ConversationState.LISTENING]: new Set([ConversationState.THINKING, ConversationState.IDLE, ConversationState.ERROR]),
@@ -44,9 +45,9 @@ export class StateMachine {
       return this._currentState;
     }
 
-    const allowed = VALID_TRANSITIONS[this._currentState] ?? new Set();
+    const allowed = VALID_TRANSITIONS[this._currentState] ?? EMPTY_SET;
     if (!allowed.has(newState)) {
-      const validStates = Array.from(allowed).map((s) => s);
+      const validStates = Array.from(allowed);
       const errMsg = `Cannot transition from ${this._currentState} to ${newState}. Valid: ${JSON.stringify(validStates)}`;
       console.warn(errMsg);
       throw new InvalidTransitionError(errMsg);

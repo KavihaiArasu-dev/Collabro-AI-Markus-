@@ -3,7 +3,6 @@
  *
  * The Markus-level policy layer that decides *what kind* of model
  * capability is needed, then delegates to OmniRoute.
- * Direct port from core/model_router.py.
  */
 
 import { omnirouteClient } from "@/lib/ai/omniroute-client";

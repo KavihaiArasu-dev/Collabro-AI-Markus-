@@ -2,17 +2,18 @@
  * Markus AI — Model Registry (§6a)
  *
  * Maps Markus modes to OmniRoute routing aliases.
- * Direct port from ai/model_registry.py.
  */
 
 import { RouteAlias, MODEL_PROFILES } from "@/lib/config/constants";
 
 class ModelRegistry {
   private _profiles: Record<string, { route: RouteAlias; description: string }>;
+  private _profilesCopy: Record<string, { route: RouteAlias; description: string }>;
   private _availableModels: Record<string, unknown>[] = [];
 
   constructor() {
     this._profiles = { ...MODEL_PROFILES };
+    this._profilesCopy = { ...this._profiles };
     console.log(`Model registry initialized with ${Object.keys(this._profiles).length} profiles`);
   }
 
@@ -30,11 +31,12 @@ class ModelRegistry {
   }
 
   listProfiles(): Record<string, { route: RouteAlias; description: string }> {
-    return { ...this._profiles };
+    return this._profilesCopy;
   }
 
   registerProfile(name: string, route: string, description: string = ""): void {
     this._profiles[name] = { route: route as RouteAlias, description };
+    this._profilesCopy = { ...this._profiles };
     console.log(`Registered model profile: ${name} → ${route}`);
   }
 

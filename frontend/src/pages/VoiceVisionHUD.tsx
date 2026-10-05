@@ -5,8 +5,33 @@ import {
   HelpCircle, Radio, Wrench, AlertCircle, Settings, X, Key, Zap, Globe, MoreVertical
 } from 'lucide-react';
 import AIOrb from '../components/AIOrb';
-import PerceptionWidget from '../components/PerceptionWidget';
 import { useAIState } from '../context/AIStateContext';
+
+const PerceptionWidget = React.lazy(() => import('../components/PerceptionWidget'));
+
+function PerceptionWidgetSkeleton() {
+  return (
+    <div style={{
+      width: 360,
+      maxWidth: '100%',
+      minHeight: 440,
+      background: 'rgba(255, 255, 255, 0.04)',
+      border: '1px solid rgba(255, 255, 255, 0.08)',
+      borderRadius: 20,
+      backdropFilter: 'blur(30px)',
+      padding: 16,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ width: 140, height: 16, background: 'rgba(255,255,255,0.08)', borderRadius: 4 }} />
+        <div style={{ width: 70, height: 26, background: 'rgba(255,255,255,0.06)', borderRadius: 8 }} />
+      </div>
+      <div style={{ flex: 1, minHeight: 200, background: 'rgba(0,0,0,0.3)', borderRadius: 12 }} />
+    </div>
+  );
+}
 
 /* ═══════════════════════════════════════════════════════════
    MARKUS AI — REAL-TIME INTELLIGENT VOICE & TEXT CONSOLE
@@ -295,6 +320,7 @@ export default function VoiceVisionHUD() {
   const silenceTimerRef = useRef<any>(null);
   const handleProcessRequestRef = useRef<(input: string) => Promise<void>>(async () => {});
   const recognitionRef = useRef<any>(null);
+  const startRecognitionRef = useRef<() => void>(() => {});
   const isProcessingRef = useRef(false);
   const isAwakeRef = useRef(true);
   const wakeWordOnlyModeRef = useRef(false);
@@ -361,23 +387,35 @@ export default function VoiceVisionHUD() {
 
   // ── Wake Word & Persistent Speech Recognition Setup (Client-Side Microphone Owner) ──
   useEffect(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+    let active = true;
+    let restartTimer: any = null;
 
-    let retryDelay = 250;
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = language;
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      console.warn('[Markus Voice] Web Speech Recognition API is not supported in this browser. Please use Chrome or Edge.');
+      return;
+    }
+
+    let recognition: any = null;
+    try {
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = language;
+    } catch (e) {
+      console.warn('[Markus Voice] SpeechRecognition constructor error:', e);
+      return;
+    }
 
     recognition.onstart = () => {
-      retryDelay = 250;
+      if (!active) return;
       setIsMicListening(true);
       isMicListeningRef.current = true;
       setMicPermissionError(false);
     };
 
     recognition.onresult = (event: any) => {
+      if (!active) return;
       let interimTranscript = '';
       let finalTranscript = '';
 
@@ -393,14 +431,13 @@ export default function VoiceVisionHUD() {
       const currentSpeech = (finalTranscript || interimTranscript).trim();
       setLiveTranscript(currentSpeech);
 
-      // Check Wake Word: only on final results or if cooldown has passed to prevent multi-fire on interim frames
+      // Check Wake Word
       const now = Date.now();
       const canCheckWake = Boolean(finalTranscript) || (now - lastWakeWordTimestampRef.current > WAKE_WORD_COOLDOWN);
       const hasWakeWord = canCheckWake && isFuzzyWakeWordMatch(currentSpeech);
 
       if (hasWakeWord) {
         lastWakeWordTimestampRef.current = now;
-        // Stop any active TTS speech immediately and switch to LISTENING state
         if ('speechSynthesis' in window && window.speechSynthesis.speaking) {
           window.speechSynthesis.cancel();
           setIsSpeakingVoice(false);
@@ -411,18 +448,23 @@ export default function VoiceVisionHUD() {
         setAiState('listening');
 
         if (awakeTimerRef.current) clearTimeout(awakeTimerRef.current);
-        awakeTimerRef.current = setTimeout(() => {
-          setIsAwake(false);
-          isAwakeRef.current = false;
-        }, 15000);
+        if (wakeWordOnlyModeRef.current) {
+          awakeTimerRef.current = setTimeout(() => {
+            setIsAwake(false);
+            isAwakeRef.current = false;
+          }, 15000);
+        }
       }
 
+      // Respond if wake word detected OR awake OR in continuous mode
       if (hasWakeWord || isAwakeRef.current || !wakeWordOnlyModeRef.current) {
-        if (awakeTimerRef.current) clearTimeout(awakeTimerRef.current);
-        awakeTimerRef.current = setTimeout(() => {
-          setIsAwake(false);
-          isAwakeRef.current = false;
-        }, 15000);
+        if (wakeWordOnlyModeRef.current) {
+          if (awakeTimerRef.current) clearTimeout(awakeTimerRef.current);
+          awakeTimerRef.current = setTimeout(() => {
+            setIsAwake(false);
+            isAwakeRef.current = false;
+          }, 15000);
+        }
 
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
 
@@ -461,69 +503,174 @@ export default function VoiceVisionHUD() {
     };
 
     recognition.onerror = (event: any) => {
-      // If permission is denied or revoked, halt retries and surface to user
-      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+      if (!active) return;
+      const errType = event.error || '';
+      if (errType === 'no-speech' || errType === 'aborted') {
+        return;
+      }
+      if (errType === 'not-allowed' || errType === 'service-not-allowed') {
         setIsMicListening(false);
         isMicListeningRef.current = false;
         setMicPermissionError(true);
+        console.warn('[Markus Voice] Microphone permission denied');
+        return;
       }
+      if (errType === 'network') {
+        console.warn('[Markus Voice] Web Speech API network error: Browser could not reach cloud speech recognition service.');
+        return;
+      }
+      console.warn('[Markus Voice] Speech recognition error:', errType);
     };
 
-    // Auto-recovery on onend to guarantee continuous operation without silent death
     recognition.onend = () => {
+      if (!active) return;
       if (isMicListeningRef.current) {
-        setTimeout(() => {
-          if (isMicListeningRef.current && recognitionRef.current) {
+        if (restartTimer) clearTimeout(restartTimer);
+        restartTimer = setTimeout(() => {
+          if (active && isMicListeningRef.current && recognitionRef.current) {
             try {
               recognitionRef.current.start();
-              retryDelay = 250;
-            } catch {
-              retryDelay = Math.min(retryDelay * 1.5, 2000);
+            } catch (e: any) {
+              if (e.name !== 'InvalidStateError') {
+                console.warn('[Markus Voice] Restart notice:', e?.message || e);
+              }
             }
           }
-        }, retryDelay);
+        }, 300);
       }
     };
 
     recognitionRef.current = recognition;
 
-    try {
-      recognition.start();
-    } catch {}
+    const safeStartRecognition = () => {
+      if (!recognitionRef.current || !active) return;
+      try {
+        recognitionRef.current.start();
+      } catch (e: any) {
+        if (e.name !== 'InvalidStateError') {
+          console.warn('[Markus Voice] Start recognition notice:', e?.message || e);
+        }
+      }
+    };
+
+    startRecognitionRef.current = safeStartRecognition;
+
+    // Request initial mic permission via getUserMedia to unlock audio stream in Chrome
+    if (navigator.mediaDevices?.getUserMedia) {
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then((stream) => {
+          stream.getTracks().forEach(t => t.stop());
+          if (active) {
+            setIsMicListening(true);
+            isMicListeningRef.current = true;
+            safeStartRecognition();
+          }
+        })
+        .catch((err) => {
+          console.warn('[Markus] Initial getUserMedia mic request:', err);
+        });
+    }
+
+    // Attach user gesture trigger in case browser required gesture for SpeechRecognition
+    const onUserInteraction = () => {
+      if (active && isMicListeningRef.current) {
+        safeStartRecognition();
+      }
+    };
+    window.addEventListener('click', onUserInteraction, { once: true });
+    window.addEventListener('keydown', onUserInteraction, { once: true });
+
+    // Support Back/Forward Cache (bfcache) by safely aborting speech synthesis & mic
+    const onPageHide = () => {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch {}
+      }
+      if ('speechSynthesis' in window && window.speechSynthesis.speaking) {
+        try { window.speechSynthesis.cancel(); } catch {}
+      }
+    };
+
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted && active && isMicListeningRef.current) {
+        safeStartRecognition();
+      }
+    };
+
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('pageshow', onPageShow);
 
     return () => {
+      active = false;
       isMicListeningRef.current = false;
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch {}
+      if (restartTimer) clearTimeout(restartTimer);
+      if (recognition) {
+        try { recognition.abort(); } catch {}
       }
+      recognitionRef.current = null;
+      window.removeEventListener('click', onUserInteraction);
+      window.removeEventListener('keydown', onUserInteraction);
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pageshow', onPageShow);
       if (awakeTimerRef.current) clearTimeout(awakeTimerRef.current);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     };
-  }, [wakeWordOnlyMode, language, setAiState]);
+  }, [wakeWordOnlyMode, setAiState]);
 
-  const toggleMicrophone = () => {
-    if (!recognitionRef.current) return;
+  // Synchronize language changes directly with recognition instance
+  useEffect(() => {
+    if (recognitionRef.current) {
+      recognitionRef.current.lang = language;
+    }
+  }, [language]);
 
+  const toggleMicrophone = async () => {
     if (isMicListening) {
       isMicListeningRef.current = false;
       setIsMicListening(false);
       setIsAwake(false);
       isAwakeRef.current = false;
       setAiState('idle');
-      try { recognitionRef.current.stop(); } catch {}
+      try { recognitionRef.current?.abort(); } catch {}
     } else {
+      try {
+        if (navigator.mediaDevices?.getUserMedia) {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach(t => t.stop());
+        }
+      } catch (err) {
+        console.warn('Microphone permission request error:', err);
+        setMicPermissionError(true);
+        return;
+      }
       isMicListeningRef.current = true;
       setIsMicListening(true);
       setIsAwake(true);
       isAwakeRef.current = true;
       setMicPermissionError(false);
       setAiState('listening');
-      try {
-        recognitionRef.current.start();
-      } catch (err) {
-        console.warn('Recognition start error:', err);
-      }
+      startRecognitionRef.current();
     }
+  };
+
+  const handleOrbClick = async () => {
+    if (!isMicListening) {
+      await toggleMicrophone();
+      return;
+    }
+    // Awaken Markus immediately & trigger listening
+    playWakeChime();
+    setIsAwake(true);
+    isAwakeRef.current = true;
+    setAiState('listening');
+    if (awakeTimerRef.current) clearTimeout(awakeTimerRef.current);
+    if (wakeWordOnlyModeRef.current) {
+      awakeTimerRef.current = setTimeout(() => {
+        setIsAwake(false);
+        isAwakeRef.current = false;
+        setAiState('idle');
+      }, 15000);
+    }
+    startRecognitionRef.current();
   };
 
   const stopExecutionAndVoice = () => {
@@ -1654,13 +1801,24 @@ export default function VoiceVisionHUD() {
               for (const line of lines) {
                 try {
                   const data = JSON.parse(line.slice(6));
-                  if (data.done) continue;
+                  if (data.done || data.type === 'done' || data.content === '[DONE]') continue;
                   if (data.state) setAiState(data.state);
+                  if (data.type === 'metadata' || (typeof data.content === 'string' && data.content.startsWith('{"intent":'))) {
+                    let meta = data;
+                    if (typeof data.content === 'string' && data.content.startsWith('{')) {
+                      try { meta = JSON.parse(data.content); } catch {}
+                    }
+                    if (meta.category) setClassifiedCategory(meta.category);
+                    if (meta.intent) {
+                      setActiveAgent(meta.category === 'question' ? 'Knowledge Agent' : `${String(meta.intent).toUpperCase()} AGENT`);
+                    }
+                    continue;
+                  }
                   if (data.category) setClassifiedCategory(data.category);
                   if (data.intent) {
                     setActiveAgent(data.category === 'question' ? 'Knowledge Agent' : `${data.intent.toUpperCase()} AGENT`);
                   }
-                  if (data.content) {
+                  if (data.content && data.content !== '[DONE]') {
                     fullText += data.content;
                     setAssistantReply(fullText);
 
@@ -1937,6 +2095,56 @@ export default function VoiceVisionHUD() {
             </button>
           )}
 
+          {/* Direct Language Selector */}
+          <button
+            onClick={toggleLanguage}
+            title={language === 'ta-IN' ? 'Language: Tamil (தமிழ்) — Click to switch to English' : 'Language: English — Click to switch to Tamil'}
+            style={{
+              background: language === 'ta-IN' ? 'rgba(245, 158, 11, 0.16)' : 'rgba(0, 229, 255, 0.12)',
+              border: language === 'ta-IN' ? '1px solid rgba(245, 158, 11, 0.45)' : '1px solid rgba(0, 229, 255, 0.3)',
+              borderRadius: 10,
+              padding: '8px 12px',
+              color: language === 'ta-IN' ? '#FBBF24' : '#00E5FF',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: '0.74rem',
+              fontWeight: 700,
+              backdropFilter: 'blur(10px)',
+              transition: 'all 0.2s',
+            }}
+          >
+            <Globe size={14} />
+            <span>{language === 'ta-IN' ? 'TAMIL' : 'ENGLISH'}</span>
+          </button>
+
+          {/* Direct Microphone Toggle */}
+          <button
+            onClick={toggleMicrophone}
+            title={isMicListening ? 'Disable Microphone' : 'Enable Microphone'}
+            style={{
+              background: isMicListening ? 'rgba(0, 229, 255, 0.22)' : 'rgba(255, 255, 255, 0.05)',
+              border: isMicListening ? '1px solid #00E5FF' : '1px solid rgba(255, 255, 255, 0.15)',
+              borderRadius: 10,
+              padding: '8px 14px',
+              color: isMicListening ? '#00E5FF' : 'var(--text-muted)',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: '0.74rem',
+              fontWeight: 700,
+              letterSpacing: '0.04em',
+              boxShadow: isMicListening ? '0 0 16px rgba(0, 229, 255, 0.35)' : 'none',
+              backdropFilter: 'blur(10px)',
+              transition: 'all 0.2s',
+            }}
+          >
+            {isMicListening ? <Mic size={15} /> : <MicOff size={15} />}
+            <span>{isMicListening ? 'MIC ACTIVE' : 'ENABLE MIC'}</span>
+          </button>
+
           {/* Settings & Options (Three Dots) Trigger */}
           <div ref={optionsMenuRef} style={{ position: 'relative' }}>
             <button
@@ -2142,7 +2350,7 @@ export default function VoiceVisionHUD() {
         margin: '0 auto',
         zIndex: 5,
         position: 'relative',
-        padding: '10px 0',
+        padding: '10px 0 75px 0',
       }}>
         {/* Left/Center: Interactive AI Orb */}
         <div style={{
@@ -2153,7 +2361,7 @@ export default function VoiceVisionHUD() {
           flex: 1,
         }}>
           <div 
-            onClick={toggleMicrophone}
+            onClick={handleOrbClick}
             style={{
               cursor: 'pointer',
               position: 'relative',
@@ -2174,31 +2382,47 @@ export default function VoiceVisionHUD() {
             alignItems: 'center',
             gap: 6,
           }}>
-            <div style={{
-              fontSize: '0.82rem',
-              fontWeight: 600,
-              letterSpacing: '0.08em',
-              textTransform: 'uppercase',
-              color: isAwake ? '#00E5FF' : isMicListening ? '#10B981' : 'var(--text-muted)',
-              fontFamily: 'var(--font-code)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-            }}>
-              {isAwake ? (
-                <>
-                  <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#00E5FF', animation: 'pulse 1s infinite' }} />
-                  Markus is Awake! Ask your question or give a code task
-                </>
-              ) : isMicListening ? (
-                <>
-                  <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#10B981', animation: 'pulse 1.8s infinite' }} />
-                  Listening for "Hey Markus" or "Hey Mark"...
-                </>
-              ) : (
-                'Microphone paused. Click "ENABLE MIC" or click Orb to speak'
-              )}
-            </div>
+            {liveTranscript ? (
+              <div style={{
+                fontSize: '0.96rem',
+                fontWeight: 700,
+                color: '#00E5FF',
+                textShadow: '0 0 12px rgba(0, 229, 255, 0.6)',
+                fontStyle: 'italic',
+                maxWidth: 600,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}>
+                "{liveTranscript}"
+              </div>
+            ) : (
+              <div style={{
+                fontSize: '0.82rem',
+                fontWeight: 600,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                color: (isAwake || !wakeWordOnlyMode) ? '#00E5FF' : isMicListening ? '#10B981' : 'var(--text-muted)',
+                fontFamily: 'var(--font-code)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+              }}>
+                {(isAwake || !wakeWordOnlyMode) && isMicListening ? (
+                  <>
+                    <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#00E5FF', animation: 'pulse 1s infinite' }} />
+                    Markus is Listening! Say any command or click Orb to speak
+                  </>
+                ) : isMicListening ? (
+                  <>
+                    <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#10B981', animation: 'pulse 1.8s infinite' }} />
+                    Listening for "Hey Markus" or "Hey Mark"...
+                  </>
+                ) : (
+                  'Microphone paused. Click "ENABLE MIC" or click Orb to speak'
+                )}
+              </div>
+            )}
 
             {/* Audio Waveform visualizer */}
             {(isAwake || aiState === 'listening' || aiState === 'speaking') && (
@@ -2214,10 +2438,12 @@ export default function VoiceVisionHUD() {
                     key={i}
                     style={{
                       width: 3,
-                      height: `${h}%`,
+                      height: 18,
                       borderRadius: 2,
                       background: aiState === 'speaking' ? '#10B981' : '#00E5FF',
                       boxShadow: aiState === 'speaking' ? '0 0 6px #10B981' : '0 0 6px #00E5FF',
+                      transformOrigin: 'bottom',
+                      willChange: 'transform',
                       animation: `waveform 0.6s ease-in-out infinite alternate ${i * 0.08}s`,
                     }}
                   />
@@ -2235,33 +2461,39 @@ export default function VoiceVisionHUD() {
           flexDirection: 'column',
           gap: 16,
         }}>
-          <PerceptionWidget />
+          <React.Suspense fallback={<PerceptionWidgetSkeleton />}>
+            <PerceptionWidget />
+          </React.Suspense>
         </div>
       </main>
 
       {/* ── Bottom Result Console & Input Bar ── */}
       <footer style={{
-        width: '100%',
+        position: 'fixed',
+        bottom: 12,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        width: 'calc(100% - 64px)',
         maxWidth: 1080,
-        margin: '0 auto',
-        zIndex: 10,
+        zIndex: 100,
         display: 'flex',
         flexDirection: 'column',
-        gap: 10,
+        gap: 6,
+        pointerEvents: 'auto',
       }}>
         {/* Real-time Result & Voice Feedback Display */}
         <div style={{
           background: 'rgba(7, 11, 20, 0.95)',
-          border: '1px solid rgba(0, 229, 255, 0.3)',
+          border: '1px solid rgba(0, 229, 255, 0.35)',
           borderRadius: 18,
-          padding: '18px 24px',
+          padding: isExpandedResult ? '16px 24px' : '10px 20px',
           backdropFilter: 'blur(30px)',
-          boxShadow: '0 12px 40px rgba(0, 0, 0, 0.6), 0 0 20px rgba(0, 229, 255, 0.08)',
+          boxShadow: '0 12px 40px rgba(0, 0, 0, 0.8), 0 0 24px rgba(0, 229, 255, 0.12)',
           display: 'flex',
           flexDirection: 'column',
-          gap: 12,
-          maxHeight: isExpandedResult ? 520 : 260,
-          transition: 'max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+          gap: isExpandedResult ? 12 : 0,
+          maxHeight: isExpandedResult ? 480 : 54,
+          transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
           overflow: 'hidden',
         }}>
           {/* Header of Result Panel */}
@@ -2269,8 +2501,8 @@ export default function VoiceVisionHUD() {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-            paddingBottom: 8,
+            borderBottom: isExpandedResult ? '1px solid rgba(255, 255, 255, 0.08)' : 'none',
+            paddingBottom: isExpandedResult ? 8 : 0,
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               {/* Category Badge */}
@@ -2356,87 +2588,95 @@ export default function VoiceVisionHUD() {
 
               <button
                 onClick={() => setIsExpandedResult(!isExpandedResult)}
-                title={isExpandedResult ? 'Collapse' : 'Expand'}
+                title={isExpandedResult ? 'Collapse Chat Box' : 'Expand Chat Box'}
                 style={{
-                  background: 'rgba(255, 255, 255, 0.05)',
-                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  background: isExpandedResult ? 'rgba(0, 229, 255, 0.18)' : 'rgba(255, 255, 255, 0.05)',
+                  border: isExpandedResult ? '1px solid #00E5FF' : '1px solid rgba(255, 255, 255, 0.15)',
                   borderRadius: 6,
                   padding: '4px 8px',
-                  color: 'var(--text-muted)',
+                  color: isExpandedResult ? '#00E5FF' : 'var(--text-muted)',
                   cursor: 'pointer',
                   fontSize: '0.7rem',
                   display: 'flex',
                   alignItems: 'center',
+                  boxShadow: isExpandedResult ? '0 0 12px rgba(0, 229, 255, 0.25)' : 'none',
                 }}
               >
-                {isExpandedResult ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+                {isExpandedResult ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
               </button>
             </div>
           </div>
 
-          {/* Formatted Answer Body */}
-          <div style={{
-            flex: 1,
-            overflowY: 'auto',
-            paddingRight: 6,
-            fontSize: '0.92rem',
-            lineHeight: 1.65,
-            color: 'var(--text-primary)',
-            fontFamily: 'var(--font-body)',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}>
-            {aiState === 'thinking' ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ai-cyan)' }}>
-                <span className="dot-pulse" style={{
-                  width: 8, height: 8, borderRadius: '50%', background: '#00E5FF', animation: 'pulse 1s infinite'
-                }} />
-                <span>Computing and generating your exact response...</span>
-              </div>
-            ) : (
-              assistantReply || 'Ready. Speak "Hey Markus" or enter any question/code task.'
-            )}
-          </div>
-
-          {/* Prompt Input Form */}
-          <form onSubmit={handleTextSubmit} style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-            <input
-              type="text"
-              value={textInput}
-              onChange={(e) => setTextInput(e.target.value)}
-              placeholder='e.g. "gimme a python code for print hello world" or "what is React?"...'
-              style={{
+          {/* Formatted Answer Body & Chat Box (Appears when clicking the arrows at the right corner) */}
+          {isExpandedResult && (
+            <>
+              {/* Formatted Answer Body */}
+              <div style={{
                 flex: 1,
-                background: 'rgba(255, 255, 255, 0.06)',
-                border: '1px solid rgba(255, 255, 255, 0.15)',
-                borderRadius: 10,
-                padding: '10px 16px',
-                color: '#FFF',
-                fontSize: '0.88rem',
-                outline: 'none',
+                overflowY: 'auto',
+                maxHeight: 280,
+                paddingRight: 6,
+                fontSize: '0.92rem',
+                lineHeight: 1.65,
+                color: 'var(--text-primary)',
                 fontFamily: 'var(--font-body)',
-              }}
-            />
-            <button
-              type="submit"
-              disabled={!textInput.trim() || isProcessingRef.current}
-              style={{
-                background: textInput.trim() ? 'linear-gradient(135deg, #00E5FF, #3B82F6)' : 'rgba(255, 255, 255, 0.05)',
-                border: 'none',
-                borderRadius: 10,
-                padding: '10px 20px',
-                color: '#FFF',
-                fontSize: '0.82rem',
-                fontWeight: 700,
-                cursor: textInput.trim() ? 'pointer' : 'default',
-                opacity: textInput.trim() ? 1 : 0.4,
-                boxShadow: textInput.trim() ? '0 0 16px rgba(0, 229, 255, 0.3)' : 'none',
-                transition: 'all 0.2s',
-              }}
-            >
-              Run / Ask
-            </button>
-          </form>
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}>
+                {aiState === 'thinking' ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ai-cyan)' }}>
+                    <span className="dot-pulse" style={{
+                      width: 8, height: 8, borderRadius: '50%', background: '#00E5FF', animation: 'pulse 1s infinite'
+                    }} />
+                    <span>Computing and generating your exact response...</span>
+                  </div>
+                ) : (
+                  assistantReply || 'Ready. Speak "Hey Markus" or enter any question/code task.'
+                )}
+              </div>
+
+              {/* Prompt Input Form */}
+              <form onSubmit={handleTextSubmit} style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={textInput}
+                  onChange={(e) => setTextInput(e.target.value)}
+                  placeholder='e.g. "gimme a python code for print hello world" or "what is React?"...'
+                  autoFocus
+                  style={{
+                    flex: 1,
+                    background: 'rgba(255, 255, 255, 0.06)',
+                    border: '1px solid rgba(255, 255, 255, 0.15)',
+                    borderRadius: 10,
+                    padding: '10px 16px',
+                    color: '#FFF',
+                    fontSize: '0.88rem',
+                    outline: 'none',
+                    fontFamily: 'var(--font-body)',
+                  }}
+                />
+                <button
+                  type="submit"
+                  disabled={!textInput.trim() || isProcessingRef.current}
+                  style={{
+                    background: textInput.trim() ? 'linear-gradient(135deg, #00E5FF, #3B82F6)' : 'rgba(255, 255, 255, 0.05)',
+                    border: 'none',
+                    borderRadius: 10,
+                    padding: '10px 20px',
+                    color: '#FFF',
+                    fontSize: '0.82rem',
+                    fontWeight: 700,
+                    cursor: textInput.trim() ? 'pointer' : 'default',
+                    opacity: textInput.trim() ? 1 : 0.4,
+                    boxShadow: textInput.trim() ? '0 0 16px rgba(0, 229, 255, 0.3)' : 'none',
+                    transition: 'opacity 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease',
+                  }}
+                >
+                  Run / Ask
+                </button>
+              </form>
+            </>
+          )}
         </div>
 
         {/* Telemetry Footer */}

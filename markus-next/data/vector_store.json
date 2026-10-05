@@ -1,0 +1,26 @@
+{
+  "c1": {
+    "chunk_id": "c1",
+    "doc_name": "doc1.txt",
+    "text": "TypeScript is a strongly typed programming language that builds on JavaScript.",
+    "metadata": {}
+  },
+  "c2": {
+    "chunk_id": "c2",
+    "doc_name": "doc2.txt",
+    "text": "Python is known for its readability and extensive libraries for machine learning.",
+    "metadata": {}
+  },
+  "c3": {
+    "chunk_id": "c3",
+    "doc_name": "doc3.txt",
+    "text": "React is a declarative component-based front-end library.",
+    "metadata": {}
+  },
+  "c4": {
+    "chunk_id": "c4",
+    "doc_name": "doc4.txt",
+    "text": "SQLite is a self-contained serverless transactional SQL database engine.",
+    "metadata": {}
+  }
+}

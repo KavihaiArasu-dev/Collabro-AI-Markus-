@@ -1,6 +1,5 @@
 /**
  * Markus AI — Health API Route
- * Port of /api/health from FastAPI.
  */
 
 import { NextResponse } from "next/server";

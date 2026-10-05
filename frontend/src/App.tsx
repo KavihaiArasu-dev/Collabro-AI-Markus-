@@ -32,16 +32,16 @@ function LoadingScreen({ onComplete }: { onComplete: () => void }) {
       setStage(prev => {
         if (prev >= LOADING_STAGES.length - 1) {
           clearInterval(stageInterval);
-          setTimeout(onComplete, 400);
+          setTimeout(onComplete, 50);
           return prev;
         }
         return prev + 1;
       });
-    }, 350);
+    }, 25);
 
     const progressInterval = setInterval(() => {
-      setProgress(prev => Math.min(100, prev + 3));
-    }, 25);
+      setProgress(prev => Math.min(100, prev + 20));
+    }, 15);
 
     return () => {
       clearInterval(stageInterval);
@@ -59,7 +59,8 @@ function LoadingScreen({ onComplete }: { onComplete: () => void }) {
       alignItems: 'center',
       justifyContent: 'center',
       zIndex: 9999,
-      transition: 'opacity 0.5s ease',
+      transition: 'opacity 0.3s ease',
+      pointerEvents: stage >= LOADING_STAGES.length - 1 ? 'none' : 'auto',
       opacity: stage >= LOADING_STAGES.length - 1 ? 0 : 1,
     }}>
       {/* Glowing Hex / Star Core */}
@@ -107,7 +108,7 @@ function LoadingScreen({ onComplete }: { onComplete: () => void }) {
             alignItems: 'center',
             gap: 10,
             opacity: i <= stage ? 1 : 0.2,
-            transition: 'opacity 0.3s ease',
+            transition: 'opacity 0.2s ease',
           }}>
             <div style={{
               width: 6,
@@ -115,13 +116,13 @@ function LoadingScreen({ onComplete }: { onComplete: () => void }) {
               borderRadius: '50%',
               background: i < stage ? '#10B981' : i === stage ? '#00E5FF' : 'rgba(255,255,255,0.2)',
               boxShadow: i === stage ? '0 0 10px rgba(0, 229, 255, 0.6)' : 'none',
-              transition: 'all 0.3s',
+              transition: 'all 0.2s',
             }} />
             <span style={{
               fontSize: '0.75rem',
               fontFamily: 'var(--font-code)',
               color: i === stage ? '#00E5FF' : i < stage ? '#10B981' : 'var(--text-muted)',
-              transition: 'color 0.3s',
+              transition: 'color 0.2s',
             }}>
               {s}
             </span>
@@ -136,7 +137,7 @@ function LoadingScreen({ onComplete }: { onComplete: () => void }) {
         ))}
       </div>
 
-      {/* Progress bar */}
+      {/* Progress bar with GPU composited scaleX transform */}
       <div style={{
         width: 280,
         height: 2,
@@ -146,10 +147,13 @@ function LoadingScreen({ onComplete }: { onComplete: () => void }) {
       }}>
         <div style={{
           height: '100%',
-          width: `${progress}%`,
+          width: '100%',
+          transformOrigin: 'left',
+          transform: `scaleX(${progress / 100})`,
           background: 'linear-gradient(90deg, #00E5FF, #3B82F6, #8B5CF6)',
           borderRadius: 1,
-          transition: 'width 0.1s linear',
+          transition: 'transform 0.08s linear',
+          willChange: 'transform',
         }} />
       </div>
     </div>
@@ -165,7 +169,7 @@ export default function App() {
       
       <div style={{
         opacity: loading ? 0 : 1,
-        transition: 'opacity 0.5s ease',
+        transition: 'opacity 0.3s ease',
         height: '100vh',
         width: '100vw',
         position: 'relative',

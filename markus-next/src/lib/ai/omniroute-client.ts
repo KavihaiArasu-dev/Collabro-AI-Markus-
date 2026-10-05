@@ -4,8 +4,6 @@
  * OpenAI-compatible client that talks to the OmniRoute AI gateway.
  * Handles connection, streaming, error handling, and graceful fallback.
  * Markus never calls a provider SDK directly — everything goes through this client.
- *
- * Direct port from ai/omniroute_client.py — preserving multi-provider fallback logic.
  */
 
 import OpenAI from "openai";
@@ -19,6 +17,8 @@ class OmniRouteClient {
   private _connected: boolean = false;
   private _activeProvider: string = "omniroute";
   private _activeModel: string = "auto";
+  private _cachedClient: OpenAI | null = null;
+  private _cachedClientKey: string = "";
 
   constructor() {
     this._baseUrl = process.env.OMNIROUTE_BASE_URL ?? settings.omniroute.baseUrl;
@@ -63,13 +63,17 @@ class OmniRouteClient {
 
   private _getClient(): [OpenAI, string] {
     const [baseUrl, apiKey, defaultModel] = this._resolveBestEndpoint();
-    const client = new OpenAI({
-      baseURL: baseUrl,
-      apiKey: apiKey,
-      timeout: this._timeout * 1000,
-      maxRetries: this._maxRetries,
-    });
-    return [client, defaultModel];
+    const key = `${baseUrl}::${apiKey}::${this._timeout}::${this._maxRetries}`;
+    if (!this._cachedClient || this._cachedClientKey !== key) {
+      this._cachedClient = new OpenAI({
+        baseURL: baseUrl,
+        apiKey: apiKey,
+        timeout: this._timeout * 1000,
+        maxRetries: this._maxRetries,
+      });
+      this._cachedClientKey = key;
+    }
+    return [this._cachedClient, defaultModel];
   }
 
   /**
@@ -354,7 +358,7 @@ class OmniRouteClient {
   async checkConnection(): Promise<boolean> {
     try {
       const [client] = this._getClient();
-      await client.models.list();
+      await client.models.list({ timeout: 3000, maxRetries: 0 });
       this._connected = true;
       return true;
     } catch {
@@ -369,7 +373,7 @@ class OmniRouteClient {
   async listModels(): Promise<string[]> {
     try {
       const [client] = this._getClient();
-      const models = await client.models.list();
+      const models = await client.models.list({ timeout: 3000, maxRetries: 0 });
       const modelIds: string[] = [];
       for await (const model of models) {
         modelIds.push(model.id);

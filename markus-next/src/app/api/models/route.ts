@@ -1,6 +1,5 @@
 /**
  * Markus AI — Models API Routes
- * Port of /api/models from FastAPI.
  */
 
 import { NextResponse } from "next/server";

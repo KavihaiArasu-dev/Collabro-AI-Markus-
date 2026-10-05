@@ -10,7 +10,7 @@
  * Direct port from tools/tool_router.py — preserving all tool handlers.
  */
 
-import { exec } from "child_process";
+import { exec, execFile } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -633,19 +633,9 @@ class ToolRouter {
     const filePath = path.join(desktopPath, filename);
 
     return new Promise((resolve) => {
-      const psScript = `
-        Add-Type -AssemblyName System.Windows.Forms;
-        Add-Type -AssemblyName System.Drawing;
-        $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds;
-        $bitmap = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height;
-        $graphics = [System.Drawing.Graphics]::FromImage($bitmap);
-        $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size);
-        $bitmap.Save('${filePath.replace(/\\/g, "\\\\")}', [System.Drawing.Imaging.ImageFormat]::Png);
-        $graphics.Dispose();
-        $bitmap.Dispose();
-      `.replace(/\n/g, " ");
+      const psScript = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $b = New-Object System.Drawing.Bitmap $s.Width, $s.Height; $g = [System.Drawing.Graphics]::FromImage($b); $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size); $b.Save('${filePath.replace(/\\/g, "\\\\")}', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $b.Dispose();`;
 
-      exec(`powershell -Command "${psScript}"`, (error) => {
+      execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psScript], (error) => {
         if (error) {
           resolve(createExecutionResult({ success: false, error: `Failed to capture screenshot: ${error.message}` }));
         } else {

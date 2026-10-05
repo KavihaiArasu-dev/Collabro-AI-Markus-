@@ -90,6 +90,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
   const lastEmittedEmotionRef = useRef<string>('neutral');
   const candidateEmotionRef = useRef<{ emotion: string; firstSeen: number }>({ emotion: 'neutral', firstSeen: 0 });
   const backendAvailableRef = useRef<boolean>(true);
+  const backendFailuresRef = useRef<number>(0);
   const isSyncingBackendRef = useRef<boolean>(false);
   const backendAbortControllerRef = useRef<AbortController | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -242,11 +243,14 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
     return { name: 'Unknown', confidence: 0.85, isKnown: false };
   };
 
-  // Initialize MediaPipe Vision Tasks FaceDetector (BlazeFace Short Range)
+  // Progressive loading: initialize MediaPipe FaceDetector when camera is requested
+  // or deferred during browser idle time so initial LCP/TBT are not blocked.
   useEffect(() => {
     let isMounted = true;
+    let idleTimer: any = null;
+
     const initMediaPipeDetector = async () => {
-      if (mpDetectorRef.current || mpLoadingRef.current) return;
+      if (mpDetectorRef.current || mpLoadingRef.current || !isMounted) return;
       mpLoadingRef.current = true;
       try {
         const { FaceDetector, FilesetResolver } = await import('@mediapipe/tasks-vision');
@@ -299,10 +303,29 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       }
     };
 
-    initMediaPipeDetector();
+    if (cameraActive) {
+      initMediaPipeDetector();
+    } else {
+      if ('requestIdleCallback' in window) {
+        idleTimer = (window as any).requestIdleCallback(() => {
+          if (isMounted) initMediaPipeDetector();
+        }, { timeout: 4000 });
+      } else {
+        idleTimer = setTimeout(() => {
+          if (isMounted) initMediaPipeDetector();
+        }, 3000);
+      }
+    }
 
     return () => {
       isMounted = false;
+      if (idleTimer) {
+        if ('cancelIdleCallback' in window) {
+          try { (window as any).cancelIdleCallback(idleTimer); } catch {}
+        } else {
+          clearTimeout(idleTimer);
+        }
+      }
       if (mpDetectorRef.current) {
         try {
           mpDetectorRef.current.close();
@@ -310,7 +333,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
         mpDetectorRef.current = null;
       }
     };
-  }, []);
+  }, [cameraActive]);
 
   // Client-side real-time multi-face & biometric expression detector
   const analyzeClientSideFrame = async (ctx: CanvasRenderingContext2D, width: number, height: number) => {
@@ -1281,13 +1304,13 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       if (!isSubscribed || !cameraActiveRef.current || !backendAvailableRef.current) return;
       const ok = await syncBackendFrame();
       if (isSubscribed && cameraActiveRef.current) {
-        const nextDelay = ok ? 450 : 1500;
+        const nextDelay = ok ? 500 : Math.min(6000, 1500 * Math.pow(1.4, Math.min(backendFailuresRef.current, 5)));
         backendTimerRef.current = setTimeout(runBackendLoop, nextDelay);
       }
     };
 
-    timerRef.current = setTimeout(runClientLoop, 200);
-    backendTimerRef.current = setTimeout(runBackendLoop, 350);
+    timerRef.current = setTimeout(runClientLoop, 300);
+    backendTimerRef.current = setTimeout(runBackendLoop, 500);
 
     return () => {
       isSubscribed = false;
@@ -1342,6 +1365,13 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
   const startCamera = async () => {
     if (cameraActiveRef.current && streamRef.current?.active) return;
     try {
+      // Release any stale existing stream tracks to avoid self-locking the device
+      if (streamRef.current) {
+        try {
+          streamRef.current.getTracks().forEach(t => t.stop());
+        } catch {}
+        streamRef.current = null;
+      }
       setHedgedText('Starting camera...');
       let stream: MediaStream | null = null;
 
@@ -1511,16 +1541,22 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
 
   const syncBackendFrame = async (): Promise<boolean> => {
     if (isSyncingBackendRef.current) return false;
+    if (document.hidden) return false;
     if (!videoRef.current || !canvasRef.current || !cameraActiveRef.current || !backendAvailableRef.current) return false;
     const canvas = canvasRef.current;
     if (canvas.width === 0) return false;
 
+    if (backendAbortControllerRef.current) {
+      try { backendAbortControllerRef.current.abort(); } catch {}
+      backendAbortControllerRef.current = null;
+    }
+
     isSyncingBackendRef.current = true;
     try {
-      const base64Image = canvas.toDataURL('image/jpeg', 0.55);
+      const base64Image = canvas.toDataURL('image/jpeg', 0.45);
       const controller = new AbortController();
       backendAbortControllerRef.current = controller;
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
 
       const res = await fetch('/api/vision/analyze-frame', {
         method: 'POST',
@@ -1532,6 +1568,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
       clearTimeout(timeoutId);
 
       if (res && res.ok) {
+        backendFailuresRef.current = 0;
         backendAvailableRef.current = true;
         const data = await res.json();
         if (data.hedged_description) {
@@ -1583,8 +1620,10 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
         }
         return true;
       }
+      backendFailuresRef.current += 1;
       return false;
     } catch {
+      backendFailuresRef.current += 1;
       return false;
     } finally {
       isSyncingBackendRef.current = false;
@@ -1628,12 +1667,12 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
     refreshCameraDevices();
     syncKnownFacesFromBackend();
 
-    // Always-on camera: Automatically start camera on mount
+    // Automatically start camera after initial paint
     const startTimer = setTimeout(() => {
       if (!cameraActiveRef.current) {
         startCamera();
       }
-    }, 150);
+    }, 600);
 
     const handleDeviceChange = () => {
       refreshCameraDevices();
@@ -1971,6 +2010,7 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
           autoPlay
           muted
           playsInline
+          aria-label="Live camera feed"
           style={{
             width: '100%',
             height: '100%',
@@ -1978,7 +2018,9 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
             display: cameraActive ? 'block' : 'none',
             transform: 'scaleX(-1)',
           }}
-        />
+        >
+          <track kind="captions" src="data:text/vtt,WEBVTT" label="Live Camera Stream" default />
+        </video>
         <canvas ref={canvasRef} style={{ display: 'none' }} />
 
         {/* Real-Time Multi-Face Bounding Box & Emotion Tag Overlay */}
@@ -2007,7 +2049,8 @@ export default function PerceptionWidget({ onEmotionChange }: PerceptionHUDProps
                 borderRadius: 6,
                 pointerEvents: 'none',
                 boxShadow: boxGlow,
-                transition: 'all 0.08s ease-out',
+                transition: 'border-color 0.15s ease, box-shadow 0.15s ease',
+                willChange: 'transform',
                 zIndex: 6,
               }}
             >

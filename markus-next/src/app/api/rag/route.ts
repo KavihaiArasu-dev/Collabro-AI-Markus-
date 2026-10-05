@@ -1,6 +1,5 @@
 /**
  * Markus AI — RAG API Routes
- * Port of /api/rag/* from FastAPI.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -23,8 +22,7 @@ export async function POST(request: NextRequest) {
   if (action === "query") {
     const query = body.query || "";
     const topK = body.top_k || 4;
-    const results = ragRetriever.retrieve(query, topK);
-    const [contextStr] = ragRetriever.buildRagContext(query, topK);
+    const [contextStr, results] = ragRetriever.buildRagContext(query, topK);
 
     return NextResponse.json({
       query,

@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600;700&family=Sora:wght@300;400;500;600;700&display=swap');
-
 /* ═══════════════════════════════════════════════════════════
    MARKUS AI — Design System (from Markus.md UI/UX Spec)
    ═══════════════════════════════════════════════════════════ */
@@ -184,7 +182,7 @@ code, pre {
   font-size: 0.875rem;
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--transition-normal);
+  transition: transform var(--transition-normal), opacity var(--transition-normal), box-shadow var(--transition-normal);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
 }
@@ -260,8 +258,8 @@ code, pre {
 
 /* Progress ring fill */
 @keyframes progressFill {
-  from { stroke-dashoffset: 283; }
-  to { stroke-dashoffset: 0; }
+  from { opacity: 0.2; transform: rotate(-90deg) scale(0.96); }
+  to { opacity: 1; transform: rotate(0deg) scale(1); }
 }
 
 /* Slow blink for warning */
@@ -270,8 +268,8 @@ code, pre {
   50% { opacity: 0.3; }
 }
 
-/* Waveform for speaking */
+/* GPU Composited Waveform for speaking */
 @keyframes waveform {
-  0%, 100% { height: 4px; }
-  50% { height: 20px; }
+  0%, 100% { transform: scaleY(0.22); }
+  50% { transform: scaleY(1); }
 }

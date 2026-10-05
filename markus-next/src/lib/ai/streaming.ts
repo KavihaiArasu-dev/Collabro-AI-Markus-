@@ -6,15 +6,24 @@
  */
 
 export function formatSSE(data: string, event: string = "message"): string {
-  return `event: ${event}\ndata: ${JSON.stringify({ content: data })}\n\n`;
+  if (event === "metadata") {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      parsed = { content: data };
+    }
+    return `event: metadata\ndata: ${JSON.stringify({ type: "metadata", ...parsed })}\n\n`;
+  }
+  return `event: ${event}\ndata: ${JSON.stringify({ type: "chunk", content: data })}\n\n`;
 }
 
 export function formatSSEDone(): string {
-  return `event: done\ndata: ${JSON.stringify({ content: "[DONE]" })}\n\n`;
+  return `event: done\ndata: ${JSON.stringify({ type: "done", content: "[DONE]", done: true })}\n\n`;
 }
 
 export function formatSSEError(error: string): string {
-  return `event: error\ndata: ${JSON.stringify({ error })}\n\n`;
+  return `event: error\ndata: ${JSON.stringify({ type: "error", error })}\n\n`;
 }
 
 /**

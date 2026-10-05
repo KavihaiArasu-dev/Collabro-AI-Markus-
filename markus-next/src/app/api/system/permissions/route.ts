@@ -1,6 +1,5 @@
 /**
- * Markus AI — Permissions API
- * Port of /api/system/permissions from FastAPI.
+ * Markus AI — System Permissions API Route
  */
 
 import { NextRequest, NextResponse } from "next/server";

@@ -3,7 +3,6 @@
  *
  * Coordinates every agent. Routes tasks, manages workflows,
  * handles agent communication, and resolves conflicts.
- * Direct port from agents/orchestrator.py.
  */
 
 import { AgentType, IntentType } from "@/lib/config/constants";
@@ -28,11 +27,15 @@ const INTENT_TO_AGENT: Partial<Record<IntentType, AgentType>> = {
   [IntentType.AUTOMATION]: AgentType.AUTOMATION,
   [IntentType.FILE_OPERATION]: AgentType.AUTOMATION,
   [IntentType.APP_CONTROL]: AgentType.AUTOMATION,
+  [IntentType.SYSTEM_CONTROL]: AgentType.AUTOMATION,
+  [IntentType.TASK_MANAGEMENT]: AgentType.AUTOMATION,
+  [IntentType.SETTINGS]: AgentType.AUTOMATION,
   [IntentType.BROWSER_AUTOMATION]: AgentType.AUTOMATION,
   [IntentType.YOUTUBE]: AgentType.AUTOMATION,
   [IntentType.VOICE_COMMAND]: AgentType.AUTOMATION,
   [IntentType.MULTI_STEP_ACTION]: AgentType.ARCHITECT,
   [IntentType.MEMORY]: AgentType.MEMORY,
+  [IntentType.RAG]: AgentType.RESEARCHER,
   [IntentType.CHAT]: AgentType.RESEARCHER,
 };
 
@@ -73,7 +76,7 @@ class Orchestrator {
         return `Unknown agent type: ${agentType}`;
       }
     } else {
-      const intent = intentClassifier.classify(userInput);
+      const intent = (context?.intent as IntentType) || intentClassifier.classify(userInput);
       targetAgentType = INTENT_TO_AGENT[intent] ?? AgentType.RESEARCHER;
     }
 
@@ -108,7 +111,7 @@ class Orchestrator {
         return;
       }
     } else {
-      const intent = intentClassifier.classify(userInput);
+      const intent = (context?.intent as IntentType) || intentClassifier.classify(userInput);
       targetAgentType = INTENT_TO_AGENT[intent] ?? AgentType.RESEARCHER;
     }
 

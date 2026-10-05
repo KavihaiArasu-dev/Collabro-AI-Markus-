@@ -17,32 +17,37 @@ const AIStateContext = createContext<AIStateContextType>({
   isConnected: false,
 });
 
-const getWsUrl = () => {
-  if (typeof window === 'undefined') return 'ws://127.0.0.1:8010/ws';
-  // If running locally in dev mode, connect directly to backend (port 8010)
-  // regardless of which dev port Vite assigned (5173, 5174, etc.)
-  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-    return 'ws://127.0.0.1:8010/ws';
-  }
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}/ws`;
+const getWsUrl = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  // If an explicit WebSocket endpoint is configured in env, use it.
+  // Otherwise Markus Next.js backend operates via HTTP REST & SSE (/api/chat/) and does not host raw WS.
+  const customWs = (import.meta as any).env?.VITE_WS_URL;
+  if (customWs) return customWs;
+  return null;
 };
 const WS_URL = getWsUrl();
 const MAX_RECONNECT_DELAY = 15000;
 
 export const AIStateProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [aiState, setAiStateLocal] = useState<AIState>('idle');
-  const [isConnected, setIsConnected] = useState(false);
+  const [isConnected, setIsConnected] = useState(true);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
+    if (!WS_URL) {
+      // Backend operates over HTTP REST & Server-Sent Events (Next.js App Router).
+      // AIState is managed locally in React with full real-time UI/Voice synchronization.
+      setIsConnected(true);
+      return;
+    }
+
     let cancelled = false;
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempt = 0;
 
     function connect() {
-      if (cancelled) return;
+      if (cancelled || !WS_URL) return;
 
       try {
         ws = new WebSocket(WS_URL);
@@ -88,9 +93,17 @@ export const AIStateProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     function scheduleReconnect() {
       if (cancelled) return;
-      // Gentle exponential backoff: 5s, 10s, 20s, then 30s probe when backend is offline
-      const delay = reconnectAttempt >= 3 ? 30000 : Math.min(5000 * Math.pow(2, reconnectAttempt), 30000);
       reconnectAttempt++;
+      // If the endpoint does not support WebSockets (handshake timed out), do not spam connection loops
+      if (reconnectAttempt >= 2) {
+        // Quietly check again on a long interval (e.g. 2 minutes) without flooding console
+        reconnectTimer = setTimeout(() => {
+          reconnectAttempt = 0;
+          connect();
+        }, 120000);
+        return;
+      }
+      const delay = Math.min(5000 * Math.pow(2, reconnectAttempt), 30000);
       reconnectTimer = setTimeout(connect, delay);
     }
 
@@ -109,7 +122,27 @@ export const AIStateProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ws = null;
       }
       wsRef.current = null;
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pageshow', onPageShow);
     }
+
+    // Support Back/Forward Cache (bfcache) by closing active socket during pagehide
+    // and reconnecting on pageshow when persisted === true
+    function onPageHide() {
+      if (ws) {
+        try { ws.close(); } catch {}
+      }
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+    }
+
+    function onPageShow(e: PageTransitionEvent) {
+      if (e.persisted && !cancelled) {
+        connect();
+      }
+    }
+
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('pageshow', onPageShow);
 
     // Defer connection to the next microtask so React StrictMode's
     // first-mount cleanup runs BEFORE any WebSocket is ever created.

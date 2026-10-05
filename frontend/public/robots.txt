@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+
+# Agentic Crawlers & AI Discoverability
+Sitemap: https://markus.ai/sitemap.xml
+# llms-txt: https://markus.ai/llms.txt

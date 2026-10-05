@@ -1,6 +1,5 @@
 /**
  * Markus AI — Agent Status API
- * Port of /api/agents/{agent_type} from FastAPI.
  */
 
 import { NextRequest, NextResponse } from "next/server";

@@ -1,7 +1,6 @@
 /**
  * Markus AI — Lightweight Embedded Vector Store
  * TF-IDF sparse embeddings with cosine similarity.
- * Direct port from rag/vector_store.py.
  */
 
 import * as fs from "fs";
@@ -14,6 +13,8 @@ class VectorStore {
   chunks: Map<string, DocumentChunk> = new Map();
   private idf: Map<string, number> = new Map();
   private storagePath: string;
+  private _chunkVectors: Map<string, Map<string, number>> = new Map();
+  private _chunkTextLower: Map<string, string> = new Map();
 
   constructor(storagePath: string = STORE_PATH) {
     this.storagePath = storagePath;
@@ -42,6 +43,7 @@ class VectorStore {
     const docCount = this.chunks.size;
     if (docCount === 0) {
       this.idf.clear();
+      this._chunkVectors.clear();
       return;
     }
 
@@ -57,6 +59,8 @@ class VectorStore {
     for (const [term, freq] of docFreq) {
       this.idf.set(term, Math.log((1.0 + docCount) / (1.0 + freq)) + 1.0);
     }
+    // Invalidate chunk vectors since IDF weights changed
+    this._chunkVectors.clear();
   }
 
   private _embedText(text: string): Map<string, number> {
@@ -80,9 +84,19 @@ class VectorStore {
     return normalized;
   }
 
+  private _getChunkVector(chunkId: string, text: string): Map<string, number> {
+    let vec = this._chunkVectors.get(chunkId);
+    if (!vec) {
+      vec = this._embedText(text);
+      this._chunkVectors.set(chunkId, vec);
+    }
+    return vec;
+  }
+
   addChunks(chunks: DocumentChunk[]): void {
     for (const chunk of chunks) {
       this.chunks.set(chunk.chunkId, chunk);
+      this._chunkTextLower.set(chunk.chunkId, chunk.text.toLowerCase());
     }
     this._recalculateIdf();
     this._saveStore();
@@ -95,8 +109,13 @@ class VectorStore {
     const queryVec = this._embedText(query);
     const scores: Array<[string, number]> = [];
 
+    // Hoist query lowercase and word splitting outside chunk loop
+    const queryLower = query.toLowerCase();
+    const words = queryLower.split(/\s+/).filter((w) => w.length > 3);
+    const hasWords = words.length > 0;
+
     for (const [chunkId, chunk] of this.chunks) {
-      const chunkVec = this._embedText(chunk.text);
+      const chunkVec = this._getChunkVector(chunkId, chunk.text);
       let dotProduct = 0;
       for (const [term, qVal] of queryVec) {
         const cVal = chunkVec.get(term);
@@ -105,12 +124,16 @@ class VectorStore {
         }
       }
 
-      // Exact keyword boost
-      const queryLower = query.toLowerCase();
-      const words = queryLower.split(/\s+/).filter((w) => w.length > 3);
-      const chunkLower = chunk.text.toLowerCase();
-      if (words.some((w) => chunkLower.includes(w))) {
-        dotProduct += 0.15;
+      // Exact keyword boost with cached lowercased chunk text
+      if (hasWords) {
+        let chunkLower = this._chunkTextLower.get(chunkId);
+        if (chunkLower === undefined) {
+          chunkLower = chunk.text.toLowerCase();
+          this._chunkTextLower.set(chunkId, chunkLower);
+        }
+        if (words.some((w) => chunkLower!.includes(w))) {
+          dotProduct += 0.15;
+        }
       }
 
       if (dotProduct > 0.05) {
@@ -131,6 +154,8 @@ class VectorStore {
   clear(): void {
     this.chunks.clear();
     this.idf.clear();
+    this._chunkVectors.clear();
+    this._chunkTextLower.clear();
     this._saveStore();
   }
 

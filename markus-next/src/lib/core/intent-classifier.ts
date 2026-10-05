@@ -2,7 +2,6 @@
  * Markus AI — Intent Classifier (§4)
  *
  * Classifies user input into intent categories using keyword/regex heuristics.
- * Direct port from core/intent_classifier.py — preserving all patterns exactly.
  */
 
 import { IntentType } from "@/lib/config/constants";
@@ -21,18 +20,22 @@ const INTENT_PATTERNS: Record<IntentType, RegExp[]> = {
     /\b(memory leak|performance issue|slow|timeout)\b/,
   ],
   [IntentType.SYSTEM_CONTROL]: [
+    /\b(open|launch|start|run)\s+([a-zA-Z0-9_\-\.]+)/,
+    /\b(close|kill|stop|terminate|exit)\s+([a-zA-Z0-9_\-\.]+)/,
     /\b(open|launch|start|close|kill|stop|restart)\b.*\b(app|application|program|process)\b/,
     /\b(run|execute)\b.*\b(command|script|terminal|shell)\b/,
     /\b(file|folder|directory)\b.*\b(create|delete|move|copy|rename)\b/,
     /\b(system|cpu|ram|memory|disk|gpu|battery|network)\b.*\b(status|info|check|monitor)\b/,
     /\b(volume|mute|unmute|louder|quieter|softer)\b/,
     /\b(brightness|brighter|dimmer|darker)\b/,
-    /\b(screenshot|screen capture|screen grab|capture screen)\b/,
-    /\b(lock screen|shutdown|shut down|restart|reboot|power off)\b/,
+    /\b(screenshot|screen\s*shot|screen\s*grab|snapshot|capture.*screen|screen.*capture|snap.*screen|capture.*my.*screen|capture.*the.*screen)\b/,
+    /\b(lock\s*(screen|pc|computer)?|shutdown|shut\s*down|restart|reboot|power\s*off)\b/,
     /\b(battery level|battery status|how much battery)\b/,
     /\b(network status|internet status|am i connected)\b/,
     /\b(uptime|system uptime)\b/,
     /\b(wifi|wi-fi|wireless)\b/,
+    /\b(running\s*apps|list\s*apps|list\s*processes)\b/,
+    /\b(play|listen\s*to)\b.*\b(youtube|song|music|video)\b/,
   ],
   [IntentType.RESEARCH]: [
     /\b(research|find|search|look up|what is|explain|how does|documentation)\b/,
@@ -111,40 +114,44 @@ const INTENT_PATTERNS: Record<IntentType, RegExp[]> = {
   [IntentType.VOICE_COMMAND]: [],
 };
 
+const INTENT_ENTRIES = Object.entries(INTENT_PATTERNS) as [IntentType, RegExp[]][];
+
+const QUESTION_STARTERS = [
+  "what", "how", "why", "who", "when", "where", "which", "whose", "whom",
+  "can you explain", "could you explain", "explain", "tell me about",
+  "tell me", "is it", "is there", "are there", "does", "do", "did",
+  "what's", "whats", "how's", "hows", "why's", "whys", "help me understand",
+  "என்ன", "எப்படி", "யார்", "ஏன்", "எங்கே", "எப்போது", "எது",
+];
+
+const TASK_STARTERS = [
+  "write", "create", "build", "generate", "code", "implement", "make",
+  "fix", "debug", "refactor", "optimize", "delete", "remove", "clean",
+  "run", "execute", "start", "launch", "open", "close", "kill", "restart",
+  "automate", "schedule", "deploy", "install", "test", "compile",
+  "play", "search", "mute", "unmute", "screenshot", "lock", "shutdown",
+  "volume", "brightness", "focus", "switch",
+  "திற", "திறக்க", "மூடு", "மூடவும்", "எடு", "போடு", "இயக்கு", "குறை", "கூட்டு",
+  "அதிகரி", "செய்", "நிறுத்து", "அழி", "பூட்டு", "பதிவிறக்கு",
+];
+
+const TASK_INTENTS = new Set<IntentType>([
+  IntentType.CODE, IntentType.DEBUG, IntentType.SYSTEM_CONTROL,
+  IntentType.AUTOMATION, IntentType.FILE_OPERATION, IntentType.APP_CONTROL,
+  IntentType.BROWSER_AUTOMATION, IntentType.MULTI_STEP_ACTION,
+  IntentType.YOUTUBE, IntentType.VOICE_COMMAND,
+]);
+
 class IntentClassifier {
+  private _cache: Map<string, [IntentType, number]> = new Map();
+  private static readonly MAX_CACHE_SIZE = 256;
+
   /**
    * Classify user input into an intent type.
    * Uses keyword pattern matching. Falls back to CHAT for unrecognized inputs.
    */
   classify(userInput: string): IntentType {
-    if (!userInput || !userInput.trim()) {
-      return IntentType.CHAT;
-    }
-
-    const inputLower = userInput.toLowerCase();
-    const scores: Partial<Record<IntentType, number>> = {};
-
-    for (const [intent, patterns] of Object.entries(INTENT_PATTERNS)) {
-      let score = 0;
-      for (const pattern of patterns) {
-        const matches = inputLower.match(pattern);
-        if (matches) {
-          score += matches.length;
-        }
-      }
-      if (score > 0) {
-        scores[intent as IntentType] = score;
-      }
-    }
-
-    const entries = Object.entries(scores) as [IntentType, number][];
-    if (entries.length === 0) {
-      return IntentType.CHAT;
-    }
-
-    // Return the highest-scoring intent
-    entries.sort((a, b) => b[1] - a[1]);
-    return entries[0][0];
+    return this.classifyWithConfidence(userInput)[0];
   }
 
   /**
@@ -155,68 +162,65 @@ class IntentClassifier {
       return [IntentType.CHAT, 1.0];
     }
 
-    const inputLower = userInput.toLowerCase();
+    const trimmed = userInput.trim();
+    const cached = this._cache.get(trimmed);
+    if (cached) {
+      return cached;
+    }
+
+    const inputLower = trimmed.toLowerCase();
     const scores: Partial<Record<IntentType, number>> = {};
 
-    for (const [intent, patterns] of Object.entries(INTENT_PATTERNS)) {
+    for (let i = 0; i < INTENT_ENTRIES.length; i++) {
+      const [intent, patterns] = INTENT_ENTRIES[i];
       let score = 0;
-      for (const pattern of patterns) {
-        const matches = inputLower.match(pattern);
+      for (let j = 0; j < patterns.length; j++) {
+        const matches = inputLower.match(patterns[j]);
         if (matches) {
           score += matches.length;
         }
       }
       if (score > 0) {
-        scores[intent as IntentType] = score;
+        scores[intent] = score;
       }
     }
 
     const entries = Object.entries(scores) as [IntentType, number][];
+    let result: [IntentType, number];
     if (entries.length === 0) {
-      return [IntentType.CHAT, 0.5];
+      result = [IntentType.CHAT, 0.5];
+    } else {
+      const total = entries.reduce((sum, [, s]) => sum + s, 0);
+      entries.sort((a, b) => b[1] - a[1]);
+      const bestIntent = entries[0][0];
+      const confidence = total > 0 ? Math.min(entries[0][1] / total, 1.0) : 0.5;
+      result = [bestIntent, confidence];
     }
 
-    const total = entries.reduce((sum, [, s]) => sum + s, 0);
-    entries.sort((a, b) => b[1] - a[1]);
-    const bestIntent = entries[0][0];
-    const confidence = total > 0 ? Math.min(entries[0][1] / total, 1.0) : 0.5;
-
-    return [bestIntent, confidence];
+    if (this._cache.size >= IntentClassifier.MAX_CACHE_SIZE) {
+      const firstKey = this._cache.keys().next().value;
+      if (firstKey !== undefined) {
+        this._cache.delete(firstKey);
+      }
+    }
+    this._cache.set(trimmed, result);
+    return result;
   }
 
   /**
    * Analyze whether the input is a 'question' (to be answered directly)
    * or a 'task' (to be executed via code/tools/agents).
    */
-  analyzeCategory(userInput: string): [string, IntentType] {
+  analyzeCategory(userInput: string, precomputedIntent?: IntentType): [string, IntentType] {
     if (!userInput || !userInput.trim()) {
       return ["chat", IntentType.CHAT];
     }
 
     const inputLower = userInput.toLowerCase().trim();
-    const intent = this.classify(userInput);
+    const intent = precomputedIntent ?? this.classify(userInput);
 
-    const questionStarters = [
-      "what", "how", "why", "who", "when", "where", "which", "whose", "whom",
-      "can you explain", "could you explain", "explain", "tell me about",
-      "tell me", "is it", "is there", "are there", "does", "do", "did",
-      "what's", "whats", "how's", "hows", "why's", "whys", "help me understand",
-      "என்ன", "எப்படி", "யார்", "ஏன்", "எங்கே", "எப்போது", "எது",
-    ];
-
-    const taskStarters = [
-      "write", "create", "build", "generate", "code", "implement", "make",
-      "fix", "debug", "refactor", "optimize", "delete", "remove", "clean",
-      "run", "execute", "start", "launch", "open", "close", "kill", "restart",
-      "automate", "schedule", "deploy", "install", "test", "compile",
-      "play", "search", "mute", "unmute", "screenshot", "lock", "shutdown",
-      "volume", "brightness", "focus", "switch",
-      "திற", "திறக்க", "மூடு", "மூடவும்", "எடு", "போடு", "இயக்கு", "குறை", "கூட்டு",
-      "அதிகரி", "செய்", "நிறுத்து", "அழி", "பூட்டு", "பதிவிறக்கு",
-    ];
-
-    const startsWithQuestion = questionStarters.some((w) => inputLower.startsWith(w));
-    const startsWithTask = taskStarters.some((w) => inputLower.startsWith(w));
+    const startsWithQuestion = QUESTION_STARTERS.some((w) => inputLower.startsWith(w));
+    const startsWithTask = TASK_STARTERS.some((w) => inputLower.startsWith(w));
     const hasQuestionMark = userInput.includes("?");
 
     if ((startsWithQuestion || hasQuestionMark) && !startsWithTask) {
@@ -226,14 +230,7 @@ class IntentClassifier {
       return ["question", IntentType.QUESTION];
     }
 
-    const taskIntents: IntentType[] = [
-      IntentType.CODE, IntentType.DEBUG, IntentType.SYSTEM_CONTROL,
-      IntentType.AUTOMATION, IntentType.FILE_OPERATION, IntentType.APP_CONTROL,
-      IntentType.BROWSER_AUTOMATION, IntentType.MULTI_STEP_ACTION,
-      IntentType.YOUTUBE, IntentType.VOICE_COMMAND,
-    ];
-
-    if (startsWithTask || taskIntents.includes(intent)) {
+    if (startsWithTask || TASK_INTENTS.has(intent)) {
       return ["task", intent];
     }
 

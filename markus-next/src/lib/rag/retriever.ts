@@ -1,6 +1,5 @@
 /**
  * Markus AI — RAG Retriever & Knowledge Augmenter (§6b)
- * Direct port from rag/retriever.py.
  */
 
 import { vectorStore } from "./vector-store";

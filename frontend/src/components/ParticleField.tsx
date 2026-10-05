@@ -31,6 +31,8 @@ export default function ParticleField({ particleCount = 120 }: ParticleFieldProp
     let animId: number;
     let w = window.innerWidth;
     let h = window.innerHeight;
+    let lastFrameTime = 0;
+    const FRAME_INTERVAL = 1000 / 30; // 30 FPS ceiling saves ~60% CPU on throttled environments
 
     const resize = () => {
       w = window.innerWidth;
@@ -40,12 +42,12 @@ export default function ParticleField({ particleCount = 120 }: ParticleFieldProp
       canvas.height = h * dpr;
       canvas.style.width = w + 'px';
       canvas.style.height = h + 'px';
-      ctx.scale(dpr, dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
     resize();
     window.addEventListener('resize', resize);
 
-    const count = Math.min(particleCount, 120);
+    const count = Math.min(particleCount, 80);
     const stars: Star[] = Array.from({ length: count }, () => ({
       x: Math.random() * w,
       y: Math.random() * h,
@@ -56,10 +58,15 @@ export default function ParticleField({ particleCount = 120 }: ParticleFieldProp
       opacity: 0.1 + Math.random() * 0.3,
     }));
 
-    let time = 0;
+    const draw = (now: number) => {
+      animId = requestAnimationFrame(draw);
 
-    const draw = () => {
-      time += 0.008;
+      if (document.hidden) return;
+
+      const delta = now - lastFrameTime;
+      if (delta < FRAME_INTERVAL) return;
+      lastFrameTime = now - (delta % FRAME_INTERVAL);
+
       ctx.clearRect(0, 0, w, h);
 
       // 1. Update and batch draw all stars in a single path
@@ -84,7 +91,7 @@ export default function ParticleField({ particleCount = 120 }: ParticleFieldProp
       ctx.beginPath();
       for (let i = 0; i < count; i++) {
         const si = stars[i];
-        const maxJ = Math.min(i + 6, count);
+        const maxJ = Math.min(i + 5, count);
         for (let j = i + 1; j < maxJ; j++) {
           const sj = stars[j];
           const dx = si.x - sj.x;
@@ -99,11 +106,9 @@ export default function ParticleField({ particleCount = 120 }: ParticleFieldProp
       ctx.strokeStyle = 'rgba(100, 160, 255, 0.035)';
       ctx.lineWidth = 0.6;
       ctx.stroke();
-
-      animId = requestAnimationFrame(draw);
     };
 
-    draw();
+    animId = requestAnimationFrame(draw);
 
     return () => {
       cancelAnimationFrame(animId);

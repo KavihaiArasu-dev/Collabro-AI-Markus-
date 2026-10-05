@@ -22,8 +22,8 @@ A local, privacy-first AI assistant ("Markus") that:
 - Has a **floating orb HUD** frontend — a plain HTML/CSS/JS page showing only a
   glowing, breathing orb, no text or buttons (see the full orb spec in Part 3)
 
-Built entirely in **Python** for the backend/logic and **HTML/CSS/JS** for the
-frontend, structured as **Clean Architecture**. No Jupyter notebook anywhere
+Built in **TypeScript** using **Next.js** (`markus-next`) for the backend/API and
+**React/Vite** for the frontend, structured as **Clean Architecture**. No Jupyter notebook anywhere
 in the project.
 
 ---

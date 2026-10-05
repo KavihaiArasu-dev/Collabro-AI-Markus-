@@ -93,18 +93,25 @@ export default function AIOrb({ state = 'idle', size = 200, onClick }: OrbProps)
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     canvas.width = size * dpr;
     canvas.height = size * dpr;
-    ctx.scale(dpr, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     let time = 0;
     let lastTime = performance.now();
+    let lastDrawTime = 0;
+    const FRAME_INTERVAL = 1000 / 35; // Target 35 FPS ceiling to cut main-thread CPU usage in half
 
     const animate = (timestamp: number) => {
+      animationRef.current = requestAnimationFrame(animate);
+
       // Pause drawing when tab is in background to save GPU/CPU cycles
       if (document.hidden) {
         lastTime = timestamp;
-        animationRef.current = requestAnimationFrame(animate);
         return;
       }
+
+      const drawDelta = timestamp - lastDrawTime;
+      if (drawDelta < FRAME_INTERVAL) return;
+      lastDrawTime = timestamp - (drawDelta % FRAME_INTERVAL);
 
       // Delta time capped at 33ms (~30fps floor) to prevent frame jump spikes
       const elapsed = Math.min((timestamp - lastTime) / 1000, 0.033);
@@ -167,8 +174,6 @@ export default function AIOrb({ state = 'idle', size = 200, onClick }: OrbProps)
 
       // 9. Innermost Center Light (Off-center allowed, §7 Layer 8)
       drawCenterLight(ctx, center, orbRadius, cfg, time);
-
-      animationRef.current = requestAnimationFrame(animate);
     };
 
     animationRef.current = requestAnimationFrame(animate);

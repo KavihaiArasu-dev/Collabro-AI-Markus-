@@ -5,6 +5,7 @@
  * Direct port from agents/implementations.py — preserving all system prompts exactly.
  */
 
+import { execFile } from "child_process";
 import { AgentType } from "@/lib/config/constants";
 import { BaseAgent } from "./base-agent";
 import { toolRouter } from "@/lib/tools/tool-router";
@@ -153,6 +154,36 @@ export class AutomationAgent extends BaseAgent {
     yield* super.processStream(userInput, context);
   }
 
+  canHandleDirectAction(input: string): boolean {
+    const trimmed = input.trim();
+    const lower = trimmed.toLowerCase();
+    if (lower.match(/^(?:open|launch|start|run)\s+(.+)$/i)) return true;
+    if (lower.match(/^(?:close|quit|kill|stop|terminate)\s+(.+)$/i)) return true;
+    if (lower.match(/^(?:play|youtube)\s+(.+)$/i) || lower.match(/^(?:play|listen to)\s+(.+)\s+on\s+youtube$/i)) return true;
+    if (lower.match(/^(?:google|search|browse|web search)\s+(.+)$/i)) return true;
+    if (
+      lower.includes("screenshot") ||
+      lower.includes("screen shot") ||
+      lower.includes("capture screen") ||
+      lower.includes("screen capture") ||
+      lower.includes("screen grab") ||
+      lower.includes("snap screen") ||
+      lower.includes("take a snap") ||
+      lower.includes("take snapshot") ||
+      lower.includes("take a snapshot") ||
+      lower.includes("capture my screen") ||
+      lower.includes("capture the screen") ||
+      lower.includes("snap my screen") ||
+      lower === "snapshot"
+    ) return true;
+    if (/^(?:lock|lock screen|lock pc|lock computer)$/i.test(lower) || lower.includes("lock my pc") || lower.includes("lock screen")) return true;
+    if (/^(?:mute|unmute|mute volume|unmute volume)$/i.test(lower) || lower === "mute audio" || lower === "unmute audio") return true;
+    if (lower.includes("volume up") || lower.includes("increase volume") || lower.includes("turn up volume")) return true;
+    if (lower.includes("volume down") || lower.includes("decrease volume") || lower.includes("turn down volume")) return true;
+    if (lower.includes("running apps") || lower.includes("list apps") || lower.includes("list processes")) return true;
+    return false;
+  }
+
   private async _handleDirectAction(input: string): Promise<string | null> {
     const trimmed = input.trim();
     const lower = trimmed.toLowerCase();
@@ -196,7 +227,21 @@ export class AutomationAgent extends BaseAgent {
     }
 
     // 5. Screenshot
-    if (lower.includes("screenshot") || lower.includes("capture screen")) {
+    if (
+      lower.includes("screenshot") ||
+      lower.includes("screen shot") ||
+      lower.includes("capture screen") ||
+      lower.includes("screen capture") ||
+      lower.includes("screen grab") ||
+      lower.includes("snap screen") ||
+      lower.includes("take a snap") ||
+      lower.includes("take snapshot") ||
+      lower.includes("take a snapshot") ||
+      lower.includes("capture my screen") ||
+      lower.includes("capture the screen") ||
+      lower.includes("snap my screen") ||
+      lower === "snapshot"
+    ) {
       const res = await toolRouter.execute("take_screenshot", {});
       if (res.success) {
         return `📸 Screenshot captured and saved to your Desktop.`;
@@ -204,7 +249,30 @@ export class AutomationAgent extends BaseAgent {
       return `❌ Screenshot failed: ${res.error}`;
     }
 
-    // 6. Running apps
+    // 6. Lock screen
+    if (/^(?:lock|lock screen|lock pc|lock computer)$/i.test(lower) || lower.includes("lock my pc") || lower.includes("lock screen")) {
+      await toolRouter.execute("run_command", { command: "rundll32.exe user32.dll,LockWorkStation" });
+      return `🔒 Computer screen locked.`;
+    }
+
+    // 7. Volume controls
+    if (/^(?:mute|unmute|mute volume|unmute volume)$/i.test(lower) || lower === "mute audio" || lower === "unmute audio") {
+      const ps = "(New-Object -ComObject WScript.Shell).SendKeys([char]173)";
+      execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], () => {});
+      return `🔊 Master audio mute toggled.`;
+    }
+    if (lower.includes("volume up") || lower.includes("increase volume") || lower.includes("turn up volume")) {
+      const ps = "for($i=0;$i -lt 5;$i++){(New-Object -ComObject WScript.Shell).SendKeys([char]175)}";
+      execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], () => {});
+      return `🔊 Volume increased.`;
+    }
+    if (lower.includes("volume down") || lower.includes("decrease volume") || lower.includes("turn down volume")) {
+      const ps = "for($i=0;$i -lt 5;$i++){(New-Object -ComObject WScript.Shell).SendKeys([char]174)}";
+      execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], () => {});
+      return `🔉 Volume decreased.`;
+    }
+
+    // 8. Running apps
     if (lower.includes("running apps") || lower.includes("list apps") || lower.includes("list processes")) {
       const res = await toolRouter.execute("list_running_apps", {});
       if (res.success && res.result) {

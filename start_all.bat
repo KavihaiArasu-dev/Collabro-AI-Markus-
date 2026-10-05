@@ -7,10 +7,10 @@ echo   3. Markus AI Frontend      (port 5173)
 echo ===================================================
 
 start "OmniRoute Gateway" cmd /k "omniroute serve --no-open"
-timeout /t 3 /nobreak >nul
+ping -n 4 127.0.0.1 >nul
 
 start "Markus Next.js Backend" cmd /k "cd /d %~dp0markus-next && npm run dev"
-timeout /t 2 /nobreak >nul
+ping -n 3 127.0.0.1 >nul
 
 start "Markus Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
 

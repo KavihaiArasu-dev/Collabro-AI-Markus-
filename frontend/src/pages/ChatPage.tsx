@@ -347,11 +347,14 @@ export default function ChatPage() {
           for (const line of lines) {
             try {
               const data = JSON.parse(line.slice(6));
-              if (data.done) continue;
+              if (data.done || data.type === 'done' || data.content === '[DONE]') continue;
+              if (data.type === 'metadata' || (typeof data.content === 'string' && data.content.startsWith('{"intent":'))) {
+                continue;
+              }
               if (data.state) {
                 setAiState(data.state);
               }
-              if (data.content) {
+              if (data.content && data.content !== '[DONE]') {
                 fullContent += data.content;
                 setMessages(prev => prev.map(m =>
                   m.id === assistantMsg.id ? { ...m, content: fullContent, intent: data.intent } : m
