@@ -12,6 +12,7 @@ export default defineConfig({
         target: 'http://127.0.0.1:8010',
         changeOrigin: true,
         secure: false,
+        rewrite: (path: string) => (path.length > 4 && path.endsWith('/') ? path.slice(0, -1) : path),
         configure: (proxy) => {
           proxy.on('error', (_err, _req, res: any) => {
             if (res && !res.headersSent && typeof res.writeHead === 'function') {

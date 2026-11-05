@@ -270,6 +270,9 @@ export default function VoiceVisionHUD() {
   const { aiState, setAiState } = useAIState();
 
   // Voice & UI state
+  const [isSpaceHeld, setIsSpaceHeld] = useState(false);
+  const isSpaceHeldRef = useRef(false);
+  const currentTranscriptRef = useRef('');
   const [isMicListening, setIsMicListening] = useState(false);
   const [micPermissionError, setMicPermissionError] = useState(false);
   const [wakeWordOnlyMode, setWakeWordOnlyMode] = useState(false);
@@ -294,6 +297,98 @@ export default function VoiceVisionHUD() {
     setLanguage(nextLang);
     localStorage.setItem('markus_language', nextLang);
   };
+
+  const startPushToTalk = useCallback(() => {
+    if (isSpaceHeldRef.current) return;
+    isSpaceHeldRef.current = true;
+    setIsSpaceHeld(true);
+    setIsMicListening(true);
+    isMicListeningRef.current = true;
+    setIsAwake(true);
+    isAwakeRef.current = true;
+    currentTranscriptRef.current = '';
+    setLiveTranscript('');
+
+    if ('speechSynthesis' in window && window.speechSynthesis.speaking) {
+      try { window.speechSynthesis.cancel(); } catch {}
+      setIsSpeakingVoice(false);
+    }
+
+    playWakeChime();
+    setAiState('listening');
+
+    try {
+      recognitionRef.current?.start();
+    } catch (e: any) {
+      if (e?.name !== 'InvalidStateError') {
+        console.warn('[PushToTalk] Start recognition error:', e);
+      }
+    }
+  }, [setAiState]);
+
+  const stopPushToTalk = useCallback(() => {
+    if (!isSpaceHeldRef.current) return;
+    isSpaceHeldRef.current = false;
+    setIsSpaceHeld(false);
+    setIsMicListening(false);
+    isMicListeningRef.current = false;
+
+    try {
+      recognitionRef.current?.stop();
+    } catch {}
+
+    setTimeout(() => {
+      const captured = currentTranscriptRef.current.trim();
+      if (captured && !isProcessingRef.current) {
+        const query = stripWakeWords(captured) || captured;
+        console.log('[Markus Voice PTT] Submitting voice query:', query);
+        handleProcessRequestRef.current(query);
+      } else if (!isProcessingRef.current) {
+        setAiState('idle');
+      }
+    }, 200);
+  }, [setAiState]);
+
+  useEffect(() => {
+    const isInputElement = (el: EventTarget | null) => {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const tag = el.tagName.toLowerCase();
+      return tag === 'input' || tag === 'textarea' || el.isContentEditable;
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !e.repeat) {
+        if (isInputElement(e.target)) return;
+        e.preventDefault();
+        startPushToTalk();
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        if (isInputElement(e.target)) return;
+        e.preventDefault();
+        stopPushToTalk();
+      }
+    };
+
+    const handleBlur = () => {
+      if (isSpaceHeldRef.current) {
+        stopPushToTalk();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, [startPushToTalk, stopPushToTalk]);
+
 
   // AI Provider Key Settings
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -429,7 +524,10 @@ export default function VoiceVisionHUD() {
       }
 
       const currentSpeech = (finalTranscript || interimTranscript).trim();
-      setLiveTranscript(currentSpeech);
+      if (currentSpeech) {
+        currentTranscriptRef.current = currentSpeech;
+        setLiveTranscript(currentSpeech);
+      }
 
       // Check Wake Word
       const now = Date.now();
@@ -524,19 +622,14 @@ export default function VoiceVisionHUD() {
 
     recognition.onend = () => {
       if (!active) return;
-      if (isMicListeningRef.current) {
-        if (restartTimer) clearTimeout(restartTimer);
-        restartTimer = setTimeout(() => {
-          if (active && isMicListeningRef.current && recognitionRef.current) {
-            try {
-              recognitionRef.current.start();
-            } catch (e: any) {
-              if (e.name !== 'InvalidStateError') {
-                console.warn('[Markus Voice] Restart notice:', e?.message || e);
-              }
-            }
+      if (isSpaceHeldRef.current && recognitionRef.current) {
+        try {
+          recognitionRef.current.start();
+        } catch (e: any) {
+          if (e?.name !== 'InvalidStateError') {
+            console.warn('[Markus Voice] Restart notice:', e?.message || e);
           }
-        }, 300);
+        }
       }
     };
 
@@ -563,7 +656,7 @@ export default function VoiceVisionHUD() {
           if (active) {
             setIsMicListening(true);
             isMicListeningRef.current = true;
-            safeStartRecognition();
+            setMicPermissionError(false);
           }
         })
         .catch((err) => {
@@ -2058,10 +2151,10 @@ export default function VoiceVisionHUD() {
               gap: 8,
             }}>
               <span style={{ color: isAwake ? '#00E5FF' : isMicListening ? '#10B981' : 'var(--text-muted)', fontWeight: 600 }}>
-                {isAwake ? '● AWAKE (LISTENING)' : isMicListening ? '● WAKE WORD ACTIVE' : '○ MIC PAUSED'}
+                {isSpaceHeld ? '● [SPACE] RECORDING VOICE...' : '● READY (SPACEBAR PTT)'}
               </span>
               <span>•</span>
-              <span>Say "Hey Markus" or "Hey Mark"</span>
+              <span>HOLD SPACE TO TALK</span>
             </div>
           </div>
         </div>
@@ -2121,8 +2214,12 @@ export default function VoiceVisionHUD() {
 
           {/* Direct Microphone Toggle */}
           <button
+            onMouseDown={startPushToTalk}
+            onMouseUp={stopPushToTalk}
+            onTouchStart={startPushToTalk}
+            onTouchEnd={stopPushToTalk}
             onClick={toggleMicrophone}
-            title={isMicListening ? 'Disable Microphone' : 'Enable Microphone'}
+            title="Hold Spacebar to speak, or click and hold this button"
             style={{
               background: isMicListening ? 'rgba(0, 229, 255, 0.22)' : 'rgba(255, 255, 255, 0.05)',
               border: isMicListening ? '1px solid #00E5FF' : '1px solid rgba(255, 255, 255, 0.15)',
@@ -2142,7 +2239,7 @@ export default function VoiceVisionHUD() {
             }}
           >
             {isMicListening ? <Mic size={15} /> : <MicOff size={15} />}
-            <span>{isMicListening ? 'MIC ACTIVE' : 'ENABLE MIC'}</span>
+            <span>{isSpaceHeld ? 'LISTENING...' : 'HOLD [SPACE] TO TALK'}</span>
           </button>
 
           {/* Settings & Options (Three Dots) Trigger */}
@@ -2408,18 +2505,25 @@ export default function VoiceVisionHUD() {
                 alignItems: 'center',
                 gap: 8,
               }}>
-                {(isAwake || !wakeWordOnlyMode) && isMicListening ? (
+                {isSpaceHeld ? (
                   <>
-                    <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#00E5FF', animation: 'pulse 1s infinite' }} />
-                    Markus is Listening! Say any command or click Orb to speak
-                  </>
-                ) : isMicListening ? (
-                  <>
-                    <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#10B981', animation: 'pulse 1.8s infinite' }} />
-                    Listening for "Hey Markus" or "Hey Mark"...
+                    <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#00E5FF', animation: 'pulse 0.8s infinite' }} />
+                    Listening... Speak your question now! (Release [SPACE] to submit)
                   </>
                 ) : (
-                  'Microphone paused. Click "ENABLE MIC" or click Orb to speak'
+                  <>
+                    <span style={{
+                      display: 'inline-block',
+                      background: 'rgba(255, 255, 255, 0.15)',
+                      border: '1px solid rgba(0, 229, 255, 0.3)',
+                      borderRadius: 4,
+                      padding: '2px 8px',
+                      fontSize: '0.72rem',
+                      color: '#00E5FF',
+                      fontWeight: 700,
+                    }}>SPACE</span>
+                    <span>PRESS & HOLD TO ASK IN VOICE • RELEASE TO SEND & RESUME WORK</span>
+                  </>
                 )}
               </div>
             )}
@@ -2689,7 +2793,7 @@ export default function VoiceVisionHUD() {
           fontFamily: 'var(--font-code)',
           color: 'var(--text-muted)',
         }}>
-          <div>WAKE WORDS: "HEY MARKUS" / "HEY MARCUS" / "HEY MARK" • SOUND CHIME ACTIVE</div>
+          <div>PUSH-TO-TALK: PRESS & HOLD [SPACE] TO SPEAK • RELEASE TO SEND & RESUME WORK</div>
           <div>GATEWAY: {gatewayStatus.toUpperCase()}</div>
         </div>
       </footer>

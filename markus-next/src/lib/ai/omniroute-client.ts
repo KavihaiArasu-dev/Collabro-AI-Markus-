@@ -1,22 +1,22 @@
 /**
  * Markus AI — OmniRoute Client (§6a)
  *
- * OpenAI-compatible client that talks to the OmniRoute AI gateway.
- * Handles connection, streaming, error handling, and graceful fallback.
- * Markus never calls a provider SDK directly — everything goes through this client.
+ * Primary AI execution engine backed by AIServer (agy --dangerously-skip-permissions)
+ * with graceful fallback to OpenAI/Gemini providers.
  */
 
 import OpenAI from "openai";
 import { settings } from "@/lib/config/settings";
+import { queryAIServer, checkAIServerStatus } from "@/lib/ai/ai-server-client";
 
 class OmniRouteClient {
   private _baseUrl: string;
   private _apiKey: string;
   private _timeout: number;
   private _maxRetries: number;
-  private _connected: boolean = false;
-  private _activeProvider: string = "omniroute";
-  private _activeModel: string = "auto";
+  private _connected: boolean = true;
+  private _activeProvider: string = "AIServer (agy)";
+  private _activeModel: string = "agy-engine";
   private _cachedClient: OpenAI | null = null;
   private _cachedClientKey: string = "";
 
@@ -25,7 +25,27 @@ class OmniRouteClient {
     this._apiKey = process.env.OMNIROUTE_API_KEY ?? settings.omniroute.apiKey ?? "no-key";
     this._timeout = settings.omniroute.timeout;
     this._maxRetries = settings.omniroute.maxRetries;
-    console.log(`OmniRoute client initialized → ${this._baseUrl}`);
+    console.log(`OmniRoute client initialized with primary engine: AIServer (agy)`);
+  }
+
+  private _buildPromptForAIServer(
+    messages: Array<{ role: string; content: string }>,
+    systemPrompt?: string,
+  ): string {
+    const parts: string[] = [];
+    if (systemPrompt) {
+      parts.push(`SYSTEM INSTRUCTIONS:\n${systemPrompt}`);
+    }
+    for (const msg of messages) {
+      if (msg.role === "system") {
+        parts.push(`SYSTEM:\n${msg.content}`);
+      } else if (msg.role === "assistant") {
+        parts.push(`ASSISTANT:\n${msg.content}`);
+      } else {
+        parts.push(`USER:\n${msg.content}`);
+      }
+    }
+    return parts.join("\n\n");
   }
 
   /**
@@ -87,7 +107,7 @@ class OmniRouteClient {
   ): Promise<string> {
     const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
     if (!geminiKey) {
-      throw new Error("GEMINI_API_KEY is not configured");
+      throw new Error("GEMINI_API_KEY is not configured and AIServer was unavailable.");
     }
 
     const models = [
@@ -146,7 +166,7 @@ class OmniRouteClient {
   ): AsyncGenerator<string> {
     const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
     if (!geminiKey) {
-      throw new Error("GEMINI_API_KEY is not configured");
+      throw new Error("GEMINI_API_KEY is not configured and AIServer was unavailable.");
     }
 
     const models = [
@@ -165,10 +185,11 @@ class OmniRouteClient {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(30000),
         });
-        if (!res.ok || !res.body) {
-          lastError = `Gemini ${model} stream returned HTTP ${res.status}`;
+
+        if (!res.ok) {
+          const body = await res.text();
+          lastError = `Gemini ${model} returned HTTP ${res.status}: ${body.slice(0, 200)}`;
           console.warn(lastError);
           continue;
         }
@@ -177,25 +198,27 @@ class OmniRouteClient {
         this._activeModel = model;
         this._connected = true;
 
-        const reader = res.body.getReader();
+        const reader = res.body?.getReader();
+        if (!reader) continue;
+
         const decoder = new TextDecoder();
         let buffer = "";
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           buffer += decoder.decode(value, { stream: true });
+
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
 
           for (const line of lines) {
             if (line.startsWith("data: ")) {
               const jsonStr = line.slice(6).trim();
-              if (!jsonStr || jsonStr === "[DONE]") continue;
+              if (!jsonStr) continue;
               try {
-                const data = JSON.parse(jsonStr);
-                const candidates = data.candidates ?? [];
+                const parsed = JSON.parse(jsonStr);
+                const candidates = parsed.candidates ?? [];
                 if (candidates.length > 0 && candidates[0].content) {
                   const parts = candidates[0].content.parts ?? [];
                   for (const part of parts) {
@@ -260,8 +283,7 @@ class OmniRouteClient {
   }
 
   /**
-   * Generate a non-streaming response. Tries OpenAI-compatible client first,
-   * falls back to direct Gemini API.
+   * Primary generator: routes every query to AIServer (agy) first.
    */
   async generate(
     messages: Array<{ role: string; content: string }>,
@@ -270,19 +292,33 @@ class OmniRouteClient {
     maxTokens: number = 4096,
     systemPrompt?: string,
   ): Promise<string> {
-    const allMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
-    if (systemPrompt) {
-      allMessages.push({ role: "system", content: systemPrompt });
-    }
-    for (const msg of messages) {
-      allMessages.push({
-        role: msg.role as "system" | "user" | "assistant",
-        content: msg.content,
-      });
+    const prompt = this._buildPromptForAIServer(messages, systemPrompt);
+    console.log(`[OmniRouteClient] Passing question to AIServer (agy)...`);
+
+    try {
+      const response = await queryAIServer(prompt);
+      if (response && response.trim().length > 0) {
+        this._activeProvider = "AIServer (agy)";
+        this._activeModel = "agy-engine";
+        this._connected = true;
+        return response;
+      }
+    } catch (err) {
+      console.warn(`[OmniRouteClient] AIServer query failed: ${err}`);
     }
 
-    // Try OpenAI-compatible client
+    // Secondary fallback: Try OpenAI-compatible client
     try {
+      const allMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+      if (systemPrompt) {
+        allMessages.push({ role: "system", content: systemPrompt });
+      }
+      for (const msg of messages) {
+        allMessages.push({
+          role: msg.role as "system" | "user" | "assistant",
+          content: msg.content,
+        });
+      }
       const [client, defaultModel] = this._getClient();
       const response = await client.chat.completions.create({
         model: route || defaultModel,
@@ -300,12 +336,12 @@ class OmniRouteClient {
       console.warn(`OpenAI-compatible request failed: ${err}`);
     }
 
-    // Fallback to direct Gemini
+    // Tertiary fallback: direct Gemini
     return this._generateGemini(messages, temperature, maxTokens, systemPrompt);
   }
 
   /**
-   * Generate a streaming response.
+   * Primary stream generator: queries AIServer (agy) and streams the answer chunks.
    */
   async *generateStream(
     messages: Array<{ role: string; content: string }>,
@@ -314,19 +350,40 @@ class OmniRouteClient {
     maxTokens: number = 4096,
     systemPrompt?: string,
   ): AsyncGenerator<string> {
-    const allMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
-    if (systemPrompt) {
-      allMessages.push({ role: "system", content: systemPrompt });
-    }
-    for (const msg of messages) {
-      allMessages.push({
-        role: msg.role as "system" | "user" | "assistant",
-        content: msg.content,
-      });
+    const prompt = this._buildPromptForAIServer(messages, systemPrompt);
+    console.log(`[OmniRouteClient] Passing question to AIServer (agy) stream...`);
+
+    try {
+      const response = await queryAIServer(prompt);
+      if (response && response.trim().length > 0) {
+        this._activeProvider = "AIServer (agy)";
+        this._activeModel = "agy-engine";
+        this._connected = true;
+
+        // Yield in natural word chunks with slight pause for smooth UI rendering
+        const words = response.split(/(\s+)/);
+        for (const word of words) {
+          yield word;
+          await new Promise((r) => setTimeout(r, 6));
+        }
+        return;
+      }
+    } catch (err) {
+      console.warn(`[OmniRouteClient] AIServer stream failed: ${err}`);
     }
 
-    // Try OpenAI-compatible streaming
+    // Secondary fallback: Try OpenAI-compatible streaming
     try {
+      const allMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+      if (systemPrompt) {
+        allMessages.push({ role: "system", content: systemPrompt });
+      }
+      for (const msg of messages) {
+        allMessages.push({
+          role: msg.role as "system" | "user" | "assistant",
+          content: msg.content,
+        });
+      }
       const [client, defaultModel] = this._getClient();
       const stream = await client.chat.completions.create({
         model: route || defaultModel,
@@ -348,40 +405,27 @@ class OmniRouteClient {
       console.warn(`OpenAI-compatible stream failed: ${err}`);
     }
 
-    // Fallback to direct Gemini streaming
+    // Tertiary fallback: direct Gemini streaming
     yield* this._generateGeminiStream(messages, temperature, maxTokens, systemPrompt);
   }
 
   /**
-   * Check if we can connect to the OmniRoute gateway.
+   * Check connection to AIServer or gateway.
    */
   async checkConnection(): Promise<boolean> {
-    try {
-      const [client] = this._getClient();
-      await client.models.list({ timeout: 3000, maxRetries: 0 });
+    const aiServerHealth = await checkAIServerStatus();
+    if (aiServerHealth.online) {
       this._connected = true;
       return true;
-    } catch {
-      this._connected = false;
-      return false;
     }
+    return false;
   }
 
   /**
-   * List available models from OmniRoute.
+   * List available models.
    */
   async listModels(): Promise<string[]> {
-    try {
-      const [client] = this._getClient();
-      const models = await client.models.list({ timeout: 3000, maxRetries: 0 });
-      const modelIds: string[] = [];
-      for await (const model of models) {
-        modelIds.push(model.id);
-      }
-      return modelIds;
-    } catch {
-      return [];
-    }
+    return ["agy-engine", "agy-1.4.7"];
   }
 
   get activeProvider(): string {
